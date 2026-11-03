@@ -4,4 +4,3 @@ google-auth-oauthlib
 google-genai
 beautifulsoup4
 requests
-numpy
