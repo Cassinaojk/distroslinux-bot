@@ -1,8 +1,6 @@
 import os, re, json, requests, time, random, io, contextlib, unicodedata, warnings
 import builtins
-from difflib import SequenceMatcher
 from datetime import datetime, date, timezone, timedelta
-import numpy as np  # Necessário para cálculo de similaridade
 
 _VERBOSE_LOG = os.getenv("VERBOSE_LOG", "false").lower() in ("1", "true", "yes", "sim")
 _original_print = builtins.print
@@ -14,8 +12,7 @@ def print(*args, **kwargs):
     important = (
         message.startswith("SUPORTE DISTROS LINUX BR - ROBÔ")
         or message.startswith("VERSÃO ")
-        or message.startswith("Posts recentes verificados:")
-        or message.startswith("  - ")
+        or message.startswith("Posts existentes verificados:")
         or message.startswith("✓ Publicada:")
         or message.startswith("RESULTADO")
         or message.startswith("Publicações:")
@@ -35,7 +32,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.1 (Detecção Semântica de Duplicatas)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.2 (Anti-Duplicidade de Conteúdo)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -61,19 +58,6 @@ MAX_AGE_DAYS = 0
 MIN_SOURCE_CHARS = 500
 MIN_SOURCE_PARAGRAPHS = 3
 TIMEOUT = 25
-RECENT_POSTS_TO_CHECK = 30
-
-# Limiar de similaridade para considerar duplicata (0.85 = 85% de similaridade)
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.85"))
-
-GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
-GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest").strip()
-AI_PROVIDER_TIMEOUT = int(os.getenv("AI_PROVIDER_TIMEOUT", "90"))
 
 # ===== Sequência de imagens do repositório =====
 IMAGE_FILES = [f"bot/imagens/Distribuições Linux ({i}).png" for i in range(1, 13)]
@@ -111,6 +95,7 @@ _STOPWORDS_PT = {
     "sua","seus","suas","nosso","nossa","nossas","ele","ela","eles",
     "elas","nós","vós","eu","tu","você","vocês","ao","aos","à","às",
     "pelo","pela","pelos","pelas","num","numa","nuns","numas",
+    "guia", "pratico", "completo", "essenciais", "ferramentas"
 }
 
 def _tech_norm(value):
@@ -140,92 +125,11 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.1)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.2)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
 _ai_config_logged = False
-
-# ============== FUNÇÕES DE EMBEDDING (NOVO) ==============
-
-def get_embedding(text, client):
-    """Gera um embedding para o texto usando a API do Gemini."""
-    try:
-        # Limita o texto para não estourar o limite de tokens do embedding
-        text = text[:8000]
-        result = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text,
-        )
-        return result.embeddings[0].values
-    except Exception as e:
-        print(f"Erro ao gerar embedding: {e}")
-        return None
-
-def cosine_similarity(vec1, vec2):
-    """Calcula a similaridade de cosseno entre dois vetores."""
-    if vec1 is None or vec2 is None:
-        return 0.0
-    v1 = np.array(vec1)
-    v2 = np.array(vec2)
-    dot = np.dot(v1, v2)
-    norm1 = np.linalg.norm(v1)
-    norm2 = np.linalg.norm(v2)
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    return dot / (norm1 * norm2)
-
-def get_recent_embeddings(api, gen_client, limit=20):
-    """Busca os últimos N posts e gera embeddings para seus títulos + resumos."""
-    embeddings_data = []
-    try:
-        response = api.posts().list(
-            blogId=BLOGGER_BLOG_ID,
-            maxResults=limit,
-            fetchBodies=True,
-            status="live",
-            orderBy="published"
-        ).execute()
-        
-        for post in response.get("items", []):
-            title = post.get("title", "")
-            content = post.get("content", "")
-            # Extrai um resumo do conteúdo (primeiros 300 caracteres de texto visível)
-            soup = BeautifulSoup(content, "html.parser")
-            visible_text = soup.get_text(" ", strip=True)[:300]
-            text_to_embed = f"{title} {visible_text}"
-            
-            emb = get_embedding(text_to_embed, gen_client)
-            if emb:
-                embeddings_data.append({
-                    "title": title,
-                    "url": post.get("url", ""),
-                    "embedding": emb
-                })
-    except Exception as e:
-        print(f"Erro ao buscar embeddings recentes: {e}")
-    
-    return embeddings_data
-
-def is_semantic_duplicate(new_title, new_resumo, recent_embeddings, gen_client):
-    """Verifica se o novo conteúdo é semanticamente similar a algum post recente."""
-    if not recent_embeddings:
-        return False, ""
-    
-    new_text = f"{new_title} {new_resumo}"
-    new_emb = get_embedding(new_text, gen_client)
-    
-    if not new_emb:
-        return False, ""
-    
-    for item in recent_embeddings:
-        sim = cosine_similarity(new_emb, item["embedding"])
-        if sim >= SIMILARITY_THRESHOLD:
-            return True, f"{item['title'][:60]} (similaridade: {sim:.2f})"
-    
-    return False, ""
-
-# ============== FUNÇÕES AUXILIARES ==============
 
 def normalize_url(u):
     if not u: return ""
@@ -380,6 +284,80 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
+# ============== BUSCA NO BLOGGER E ANTI-DUPLICIDADE ==============
+
+def get_all_existing_data(api):
+    """Busca TODOS os posts do blog para análise de duplicidade e contagem."""
+    blog_urls, source_urls = set(), set()
+    existing_posts = [] # Armazena tuplas (titulo, texto_limpo)
+    token = None
+    
+    try:
+        while True:
+            kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True, "status": "live"}
+            if token: kw["pageToken"] = token
+            data = api.posts().list(**kw).execute()
+            
+            for post in data.get("items", []):
+                post_url = normalize_url(post.get("url",""))
+                if post_url: blog_urls.add(post_url)
+                
+                content = post.get("content","") or ""
+                title = post.get("title","") or ""
+                
+                for m in re.findall(r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I):
+                    source_urls.add(normalize_url(m))
+                for m in re.findall(r'SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I):
+                    source_urls.add(normalize_url(m))
+                
+                # Extrai texto limpo
+                clean = re.sub(r"\s+", " ", BeautifulSoup(content, "html.parser").get_text(" ", strip=True)).strip()
+                if clean and len(clean) > 100:
+                    existing_posts.append({"title": title, "text": clean})
+                    
+            token = data.get("nextPageToken")
+            if not token: break
+    except Exception as e: 
+        print("Erro ao consultar Blogger:", e)
+    
+    print(f"Posts existentes verificados: {len(existing_posts)}")
+    return blog_urls, source_urls, existing_posts
+
+def extract_meaningful_words(text):
+    """Extrai palavras únicas e relevantes do texto."""
+    norm = _tech_norm(text)
+    words = set(re.findall(r"\b[a-z]{4,}\b", norm))
+    return words - _STOPWORDS_PT
+
+def check_content_duplicate(article, existing_posts):
+    """
+    Verifica se o assunto do novo artigo já existe no blog.
+    Compara tanto o título original quanto o texto da fonte com os posts antigos.
+    """
+    new_title_words = extract_meaningful_words(article["title"])
+    new_text_words = extract_meaningful_words(article["text"])
+    
+    for old in existing_posts:
+        old_title_words = extract_meaningful_words(old["title"])
+        old_text_words = extract_meaningful_words(old["text"])
+        
+        # 1. Similaridade de Título (Se compartilham 2+ palavras fortes no título)
+        title_overlap = new_title_words & old_title_words
+        if len(title_overlap) >= 2:
+            return True, f"Título similar: {old['title'][:50]}"
+            
+        # 2. Similaridade de Conteúdo (Jaccard no texto)
+        # Se 40% das palavras da nova notícia já estão no post antigo
+        if new_text_words and old_text_words:
+            intersection = new_text_words & old_text_words
+            union = new_text_words | old_text_words
+            jaccard = len(intersection) / len(union)
+            
+            if jaccard > 0.40:
+                return True, f"Conteúdo similar ({jaccard*100:.0f}%): {old['title'][:50]}"
+                
+    return False, ""
+
 # ============== ARTIGO ==============
 
 def get_article(url):
@@ -454,28 +432,6 @@ def blogger():
                         client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET,
                         scopes=["https://www.googleapis.com/auth/blogger"])
     return build("blogger", "v3", credentials=creds, cache_discovery=False)
-
-def existing(api, show_log=True):
-    blog_urls, source_urls = set(), set()
-    token = None
-    try:
-        while True:
-            kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True, "status": "live"}
-            if token: kw["pageToken"] = token
-            data = api.posts().list(**kw).execute()
-            for post in data.get("items", []):
-                post_url = normalize_url(post.get("url",""))
-                if post_url: blog_urls.add(post_url)
-                content = post.get("content","") or ""
-                for m in re.findall(r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I): source_urls.add(normalize_url(m))
-                for m in re.findall(r'SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I): source_urls.add(normalize_url(m))
-            token = data.get("nextPageToken")
-            if not token: break
-    except Exception as e: print("Erro ao consultar Blogger:", e)
-    if show_log:
-        print("Posts existentes no Blogger:", len(blog_urls))
-        print("Fontes já registradas:", len(source_urls))
-    return blog_urls, source_urls
 
 # ============== IA ==============
 
@@ -710,16 +666,12 @@ def html(article, generated, final_image="", image_origin="", seo=None):
 
 # ============== MAIN ==============
 def main():
-    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Detecção Semântica")
+    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Anti-Duplicidade de Texto")
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
     
-    # 1. Busca embeddings dos posts recentes (NOVO)
-    print("Buscando embeddings de posts recentes para comparação semântica...")
-    recent_embeddings = get_recent_embeddings(api, gen_client, limit=RECENT_POSTS_TO_CHECK)
-    print(f"Posts recentes com embeddings carregados: {len(recent_embeddings)}")
-
-    old_blog_urls, old_source_urls = existing(api)
+    # 1. Pega TODOS os posts (títulos e textos limpos)
+    old_blog_urls, old_source_urls, existing_posts = get_all_existing_data(api)
     posts_count = count_bot_posts(api)
 
     candidates = []; candidate_urls = set(); source_counts = {}; prefiltered = 0
@@ -746,6 +698,14 @@ def main():
         n = normalize_url(art["url"])
         if n in old_source_urls: ignored += 1; continue
 
+        # VERIFICAÇÃO 1 (Antes da IA): Compara a fonte original com o site
+        is_dup_pre, dup_reason_pre = check_content_duplicate(art, existing_posts)
+        if is_dup_pre:
+            print(f"⚠ Duplicata de assunto (Pré-IA): «{art['title'][:60]}» — {dup_reason_pre}.")
+            dups += 1
+            ignored += 1
+            continue
+
         if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
             break
 
@@ -756,16 +716,12 @@ def main():
             if gemini_quota_hit: break
             continue
 
-        # VERIFICAÇÃO SEMÂNTICA (NOVO)
-        is_dup, dup_reason = is_semantic_duplicate(
-            gen.get("titulo", ""), 
-            gen.get("resumo", ""), 
-            recent_embeddings, 
-            gen_client
-        )
+        # VERIFICAÇÃO 2 (Após IA): Cria um pseudo-artigo com o texto gerado pela IA e compara novamente
+        gen_art = {"title": gen.get("titulo", ""), "text": gen.get("materia", "")}
+        is_dup_post, dup_reason_post = check_content_duplicate(gen_art, existing_posts)
         
-        if is_dup:
-            print(f"⚠ Duplicata de assunto (semântica): «{gen.get('titulo','')[:60]}» é similar a «{dup_reason}» — pulando.")
+        if is_dup_post:
+            print(f"⚠ Duplicata de assunto (Pós-IA): «{gen.get('titulo','')[:60]}» — {dup_reason_post}.")
             dups += 1
             ignored += 1
             continue
@@ -793,14 +749,8 @@ def main():
             published += 1
             old_source_urls.add(n)
 
-            # Adiciona o novo post à lista de embeddings para evitar duplicatas na mesma execução
-            new_emb = get_embedding(f"{gen['titulo']} {gen['resumo']}", gen_client)
-            if new_emb:
-                recent_embeddings.append({
-                    "title": seo["title"],
-                    "url": resp.get("url", ""),
-                    "embedding": new_emb
-                })
+            # Adiciona o novo post à lista de posts existentes para evitar duplicatas na mesma execução
+            existing_posts.append({"title": seo["title"], "text": gen.get("materia", "")})
 
             if resp.get("url"):
                 old_blog_urls.add(normalize_url(resp["url"]))
@@ -821,6 +771,6 @@ def main():
     print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.1 ATIVA: Detecção Semântica de Duplicatas | Filtro de Data (Hoje) | Imagem por distro | SEO")
+print("VERSÃO 3.2 ATIVA: Anti-Duplicidade por Texto | Filtro de Data (Hoje) | Imagem por distro | SEO")
 
 main()
