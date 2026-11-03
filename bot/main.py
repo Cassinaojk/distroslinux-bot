@@ -12,36 +12,20 @@ def print(*args, **kwargs):
     important = (
         message.startswith("SUPORTE DISTROS LINUX BR - ROBÔ")
         or message.startswith("VERSÃO ")
-        or message.startswith("Fontes:")
-        or message.startswith("Posts existentes no Blogger:")
-        or message.startswith("Fontes já registradas:")
-        or message.startswith("Conteúdos indexados")
-        or message.startswith("Fontes encontradas:")
-        or message.startswith("Novas matérias:")
-        or message.startswith("Puladas:")
-        or message.startswith("Duplicatas de conteúdo:")
-        or message == "RESULTADO"
+        or message.startswith("Posts recentes verificados:")
+        or message.startswith("Assuntos bloqueados:")
+        or message.startswith("✓ Publicada:")
+        or message.startswith("RESULTADO")
         or message.startswith("Publicações:")
         or message.startswith("Ignoradas:")
         or message.startswith("Falhas:")
-        or message.startswith("✓ Publicada:")
-        or message.startswith("✓ Imagem:")
-        or message.startswith("✓ SEO:")
-        or message.startswith("✓ Labels:")
-        or message.startswith("⚠ Blogger:")
-        or message.startswith("⚠ IA:")
-        or message.startswith("⚠ Gemini:")
-        or message.startswith("⚠ Imagem:")
-        or message.startswith("⚠ Pulada:")
-        or message.startswith("⚠ Duplicata:")
-        or message.startswith("Erro ao consultar Blogger:")
+        or message.startswith("⚠ Duplicata de assunto:")
         or message.startswith("Erro:")
     )
     if important:
         return _original_print(*args, **kwargs)
 
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
-
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from datetime import datetime, date, timezone, timedelta
 from urllib.parse import urlparse, urljoin, quote
@@ -49,7 +33,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 1.9 (Duplicidade: título, resumo e termos raros)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 2.1 (Bloqueio por Assunto Recente)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -57,23 +41,21 @@ GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 BLOGGER_REFRESH_TOKEN = os.environ["BLOGGER_REFRESH_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
+# ===== Configurações Gerais =====
 BLOG_NAME = os.getenv("BLOG_NAME", "Suporte Distros Linux BR").strip() or "Suporte Distros Linux BR"
 BLOG_HOME_URL = os.getenv("BLOG_HOME_URL", "https://suportedistroslinuxbr.blogspot.com").strip().rstrip("/")
 BLOG_LOCALE = os.getenv("BLOG_LOCALE", "pt_BR").strip() or "pt_BR"
-BLOG_TWITTER = os.getenv("BLOG_TWITTER", "").strip()
 SEO_TITLE_SUFFIX = os.getenv("SEO_TITLE_SUFFIX", f" | {BLOG_NAME}").strip()
 SEO_DESCRIPTION_MAX = int(os.getenv("SEO_DESCRIPTION_MAX", "160"))
 SEO_KEYWORDS_MAX = int(os.getenv("SEO_KEYWORDS_MAX", "12"))
 
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))
 MAX_GEMINI_TEXT_CALLS_PER_RUN = int(os.getenv("MAX_GEMINI_TEXT_CALLS_PER_RUN", "6"))
-GEMINI_MAX_RETRIES = 3
-GEMINI_RETRY_BASE_SECONDS = 4
-MAX_LINKS_PER_SOURCE = 80
 MAX_AGE_DAYS = 3650
 MIN_SOURCE_CHARS = 500
 MIN_SOURCE_PARAGRAPHS = 3
 TIMEOUT = 25
+RECENT_POSTS_TO_CHECK = 20 # Quantos posts recentes verificar
 
 GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
@@ -84,27 +66,15 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest").strip()
 AI_PROVIDER_TIMEOUT = int(os.getenv("AI_PROVIDER_TIMEOUT", "90"))
 
-# ===== Duplicidade =====
-CONTENT_DUPLICATE_THRESHOLD = float(os.getenv("CONTENT_DUPLICATE_THRESHOLD", "0.50"))
-CONTENT_SIGNATURE_CHARS = int(os.getenv("CONTENT_SIGNATURE_CHARS", "1200"))
-RARE_TERMS_OVERLAP_THRESHOLD = float(os.getenv("RARE_TERMS_OVERLAP_THRESHOLD", "0.40"))
-RARE_TERMS_MIN_COMMON = int(os.getenv("RARE_TERMS_MIN_COMMON", "2"))
-CLEAN_DUPLICATES = os.getenv("CLEAN_DUPLICATES", "false").lower() in ("1", "true", "yes", "sim")
-
 # ===== Sequência de imagens do repositório =====
 IMAGE_FILES = [f"bot/imagens/Distribuições Linux ({i}).png" for i in range(1, 13)]
-
-# ===== Imagens por distro =====
 DISTRO_BASE_NAMES = {
-    "arch": "arch", "centos": "cent os", "cent os": "cent os",
-    "debian": "debian", "deepin": "deepin",
-    "elementary os": "elementary os", "elementaryos": "elementary os",
-    "fedora": "fedora", "kubuntu": "kubuntu",
-    "linux mint": "linux mint", "mint": "linux mint",
-    "manjaro": "manjaro", "pop os": "pop os", "popos": "pop os",
-    "red hat": "red hat", "redhat": "red hat", "rhel": "red hat",
-    "suse": "suse", "opensuse": "suse", "ubuntu": "ubuntu",
-    "xubuntu": "xubuntu", "zorin os": "zorin os", "zorin": "zorin os",
+    "arch": "arch", "centos": "cent os", "cent os": "cent os", "debian": "debian",
+    "deepin": "deepin", "elementary os": "elementary os", "elementaryos": "elementary os",
+    "fedora": "fedora", "kubuntu": "kubuntu", "linux mint": "linux mint", "mint": "linux mint",
+    "manjaro": "manjaro", "pop os": "pop os", "popos": "pop os", "red hat": "red hat",
+    "redhat": "red hat", "rhel": "red hat", "suse": "suse", "opensuse": "suse",
+    "ubuntu": "ubuntu", "xubuntu": "xubuntu", "zorin os": "zorin os", "zorin": "zorin os",
 }
 DISTROS_IMAGE_DIR = "bot/imagens/distros"
 
@@ -160,11 +130,7 @@ def _tech_norm(value):
 def is_tech_related(article=None, generated=None, raw_text=""):
     article = article or {}
     generated = generated or {}
-    parts = [
-        article.get("title", ""), article.get("text", ""),
-        generated.get("titulo", ""), generated.get("resumo", ""),
-        generated.get("materia", ""), raw_text,
-    ]
+    parts = [article.get("title", ""), article.get("text", ""), generated.get("titulo", ""), generated.get("resumo", ""), generated.get("materia", ""), raw_text]
     combined = _tech_norm(" ".join(str(x or "") for x in parts))
     if not combined: return False
     return any(term in combined for term in LINUX_TERMS)
@@ -178,17 +144,12 @@ SOURCES = [
     {"nome": "It's FOSS", "url": "https://itsfoss.com/", "feeds": ["https://itsfoss.com/rss/"]},
 ]
 
-BAD_PATHS = (
-    "/category/","/tag/","/author/","/page/","/search/","/feed/",
-    "/wp-json/","/comments/","/sobre","/contato","/contact",
-    "/politica","/privacidade","/privacy","/anuncie","/publicidade",
-    "/advertising","/login","/cadastro","/register","/sitemap","/robots.txt",
-)
+BAD_PATHS = ("/category/","/tag/","/author/","/page/","/search/","/feed/","/wp-json/","/comments/","/sobre","/contato","/contact","/politica","/privacidade","/privacy","/anuncie","/publicidade","/advertising","/login","/cadastro","/register","/sitemap","/robots.txt")
 SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter.com/intent","x.com/intent","whatsapp.com/","t.me/share","linkedin.com/share")
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/1.9)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/2.1)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -210,16 +171,12 @@ def bad_url(u):
 def soup(url, xml=False):
     try:
         r = s.get(url, timeout=TIMEOUT)
-        print(f"Abrindo: {url}\nHTTP: {r.status_code}")
         if r.status_code != 200: return None
         if xml:
             try: return BeautifulSoup(r.text, "xml")
-            except Exception as e: print("Parser XML indisponível; usando HTML:", e)
+            except Exception: pass
         return BeautifulSoup(r.text, "html.parser")
-    except requests.exceptions.SSLError:
-        return None
-    except Exception as e:
-        print("Erro:", e); return None
+    except Exception: return None
 
 def date_parse(v):
     if not v: return None
@@ -319,7 +276,7 @@ def count_image_variants_in_blogger(api, base_name):
                     elif m.group(1) == "2": c2 += 1
             token = data.get("nextPageToken")
             if not token: break
-    except Exception as e: print("Erro ao contar variantes:", e)
+    except Exception: pass
     return c1, c2
 
 def pick_distro_image_url(api, base_name):
@@ -342,7 +299,7 @@ def count_bot_posts(api):
                 if "SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:" in (post.get("content","") or ""): count += 1
             token = data.get("nextPageToken")
             if not token: break
-    except Exception as e: print("Erro ao contar posts:", e)
+    except Exception: pass
     return count
 
 def pick_next_image_url(posts_count):
@@ -351,19 +308,23 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
-# ============== DUPLICIDADE ==============
+# ============== DUPLICIDADE POR ASSUNTO (A CORREÇÃO) ==============
 
-def _strip_html(text):
-    return re.sub(r"\s+", " ", BeautifulSoup(str(text or ""), "html.parser").get_text(" ", strip=True)).strip()
-
-def _content_tokens(text):
-    text = unicodedata.normalize("NFKD", text or "")
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    text = text.lower()
-    return [w for w in re.findall(r"[a-z0-9]{3,}", text) if w not in _STOPWORDS_PT]
-
-def _content_signature(text, title=""):
-    return _content_tokens(f"{title} {(text or '')[:CONTENT_SIGNATURE_CHARS]}")
+def get_recent_titles(api):
+    """Busca os títulos dos últimos N posts publicados no blog."""
+    titles = []
+    try:
+        response = api.posts().list(
+            blogId=BLOGGER_BLOG_ID,
+            maxResults=RECENT_POSTS_TO_CHECK,
+            fetchBodies=False,
+            status="live"
+        ).execute()
+        for post in response.get("items", []):
+            titles.append(post.get("title", ""))
+    except Exception as e:
+        print(f"Erro ao buscar títulos recentes: {e}")
+    return titles
 
 _RARE_TOKEN_PATTERNS = [
     re.compile(r"\b[A-Z][a-zA-Z0-9]{2,}\b"),
@@ -374,57 +335,46 @@ _RARE_TOKEN_PATTERNS = [
     re.compile(r"\b[a-z]{2,}\d+[a-z0-9]*\b"),
 ]
 
-def _extract_rare_terms(text):
-    if not text: return set()
-    terms = set(); raw = str(text)
+def extract_rare_terms_from_title(title):
+    """Extrai palavras-chave do título (ex: fedora, 45, gnome, kde)."""
+    terms = set()
+    raw = str(title)
+    # Pega nomes próprios, siglas e números (ex: Fedora, 45, GNOME)
     for pat in _RARE_TOKEN_PATTERNS:
         for m in pat.finditer(raw):
             term = re.sub(r"\s+", " ", _tech_norm(m.group(0))).strip()
             if len(term) < 3 or term in _GENERIC_NEWS_TERMS or term in _STOPWORDS_PT: continue
             terms.add(term)
-    for w in re.findall(r"\b[a-z]{6,}\b", _tech_norm(raw)):
+    # Pega palavras técnicas longas (ex: linux, plasma, podman)
+    for w in re.findall(r"\b[a-z]{5,}\b", _tech_norm(raw)):
         if w not in _GENERIC_NEWS_TERMS and w not in _STOPWORDS_PT: terms.add(w)
     return terms
 
-def is_rare_terms_duplicate(new_article, existing_contents):
-    new_terms = _extract_rare_terms((new_article.get("title","") or "") + " " + (new_article.get("text","") or "")[:3000])
-    if len(new_terms) < RARE_TERMS_MIN_COMMON: return False, 0.0, "", 0
-    best = (False, 0.0, "", 0)
-    for old_title, old_text in existing_contents:
-        old_terms = _extract_rare_terms(old_text or "")
-        if not old_terms: continue
-        common = new_terms & old_terms
-        union = new_terms | old_terms
-        jacc = len(common) / len(union)
-        overlap_a = len(common) / len(new_terms)
-        if len(common) >= RARE_TERMS_MIN_COMMON and (overlap_a >= RARE_TERMS_OVERLAP_THRESHOLD or jacc >= 0.35):
-            return True, jacc, old_title, len(common)
-        if jacc > best[1]: best = (False, jacc, old_title, len(common))
-    return best
+def is_subject_duplicate(new_title, recent_titles):
+    """
+    Verifica se o assunto (palavras-chave) do novo título já foi falado nos títulos recentes.
+    Ex: Se novo título tem "Fedora 45", e algum recente tem "Fedora 45", bloqueia.
+    """
+    new_terms = extract_rare_terms_from_title(new_title)
+    if not new_terms:
+        return False, ""
 
-def is_content_duplicate(new_article, existing_contents, threshold=None):
-    if threshold is None: threshold = CONTENT_DUPLICATE_THRESHOLD
-    new_sig = _content_signature(new_article.get("text",""), new_article.get("title",""))
-    if len(new_sig) < 20: return False, 0.0, ""
-    new_joined = " ".join(new_sig); best_ratio, best_title = 0.0, ""
-    for old_title, old_text in existing_contents:
-        old_sig = _content_tokens(old_text or "")
-        if len(old_sig) < 20: continue
-        ratio = SequenceMatcher(None, new_joined, " ".join(old_sig)).ratio()
-        if ratio > best_ratio:
-            best_ratio, best_title = ratio, old_title
-            if ratio >= threshold: break
-    return best_ratio >= threshold, best_ratio, best_title
+    for old_title in recent_titles:
+        old_terms = extract_rare_terms_from_title(old_title)
+        if not old_terms:
+            continue
+        
+        # Interseção: quais palavras-chave do novo título já estão no título antigo?
+        common_terms = new_terms & old_terms
+        
+        # Se compartilham 2 ou mais termos importantes, consideramos o mesmo assunto.
+        # Ex: "fedora" e "45", ou "gnome" e "51".
+        if len(common_terms) >= 2:
+            return True, old_title
+            
+    return False, ""
 
-def check_duplicate(article, existing_contents):
-    dup_seq, ratio_seq, title_seq = is_content_duplicate(article, existing_contents)
-    if dup_seq: return True, f"sequência {ratio_seq:.2f}", ratio_seq, title_seq
-    dup_rare, jacc_rare, title_rare, common = is_rare_terms_duplicate(article, existing_contents)
-    if dup_rare: return True, f"termos raros (jacc={jacc_rare:.2f}, comuns={common})", jacc_rare, title_rare
-    if ratio_seq >= jacc_rare: return False, "", ratio_seq, title_seq
-    return False, "", jacc_rare, title_rare
-
-# ============== ARTIGO ==============
+# ============== ARTIGO, IA, SEO, HTML (mantidos) ==============
 
 def get_article(url):
     x = soup(url)
@@ -483,7 +433,6 @@ def links(source):
             if bad_url(u): continue
             if not host_matches(u) or not section_matches(u): continue
             if u not in seen: seen.add(u); out.append(u)
-    print(f"Links encontrados em {source['nome']}: {len(out)}")
     return out[:MAX_LINKS_PER_SOURCE]
 
 def blogger():
@@ -509,40 +458,14 @@ def existing(api, show_log=True):
                 post_id = post.get("id","")
                 for m in re.findall(r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I): source_urls.add(normalize_url(m))
                 for m in re.findall(r'SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I): source_urls.add(normalize_url(m))
-                clean = _strip_html(content)
+                clean = re.sub(r"\s+", " ", BeautifulSoup(content, "html.parser").get_text(" ", strip=True)).strip()
                 if clean and len(clean) > 200:
                     existing_contents.append((title, clean))
                     existing_posts.append((post_id, title, clean, post.get("status","")))
             token = data.get("nextPageToken")
             if not token: break
     except Exception as e: print("Erro ao consultar Blogger:", e)
-    if show_log:
-        print("Posts existentes no Blogger:", len(blog_urls))
-        print("Fontes já registradas:", len(source_urls))
-        print("Conteúdos indexados para comparação:", len(existing_contents))
     return blog_urls, source_urls, existing_contents, existing_posts
-
-def clean_duplicates(api, existing_posts):
-    if not existing_posts: return
-    reversed_posts = list(reversed(existing_posts))
-    seen = []; cleaned = 0
-    for post_id, title, clean, status in reversed_posts:
-        tokens = _content_tokens(clean)
-        if len(tokens) < 20: seen.append((title, clean, post_id)); continue
-        dup_of = None; best = 0.0
-        for old_title, old_clean, old_id in seen:
-            ratio = SequenceMatcher(None, " ".join(tokens), " ".join(_content_tokens(old_clean))).ratio()
-            if ratio > best: best, dup_of = ratio, old_id
-        if dup_of and best >= CONTENT_DUPLICATE_THRESHOLD:
-            try:
-                api.posts().revert(blogId=BLOGGER_BLOG_ID, postId=post_id).execute()
-                print(f"⚠ Duplicata revertida: {title[:60]} (seq {best:.2f})")
-                cleaned += 1
-            except Exception as e: print(f"Erro ao reverter {post_id}: {e}")
-        else: seen.append((title, clean, post_id))
-    print(f"Duplicatas revertidas: {cleaned}")
-
-# ============== IA ==============
 
 def is_transient_gemini_error(exc):
     m = str(exc).upper()
@@ -550,15 +473,15 @@ def is_transient_gemini_error(exc):
 
 def gemini_request(client, model, prompt):
     last = None
-    for attempt in range(1, GEMINI_MAX_RETRIES + 1):
+    for attempt in range(1, 4):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 return client.models.generate_content(model=model, contents=prompt, config={"response_mime_type": "application/json"})
         except Exception as e:
             last = e; m = str(e).upper()
             if "429" in m or "RESOURCE_EXHAUSTED" in m: raise
-            if not is_transient_gemini_error(e) or attempt >= GEMINI_MAX_RETRIES: raise
-            time.sleep(GEMINI_RETRY_BASE_SECONDS * (2 ** (attempt-1)) + random.uniform(0,2))
+            if not is_transient_gemini_error(e) or attempt >= 3: raise
+            time.sleep(4 * (2 ** (attempt-1)) + random.uniform(0,2))
     raise last
 
 def norm_words(text):
@@ -566,99 +489,53 @@ def norm_words(text):
     text = "".join(c for c in text if not unicodedata.combining(c)).lower()
     return re.findall(r"[a-z0-9]+", text)
 
-def ngrams(words, n=8):
-    return {" ".join(words[i:i+n]) for i in range(max(0, len(words)-n+1))}
-
-def longest_common_phrase(src, out, min_w=15):
-    if not src or not out: return 0
-    pos = {}
-    for i, w in enumerate(src): pos.setdefault(w, []).append(i)
-    best = 0
-    for j, w in enumerate(out):
-        for i in pos.get(w, [])[:20]:
-            k = 0
-            while i+k < len(src) and j+k < len(out) and src[i+k] == out[j+k]: k += 1
-            best = max(best, k)
-            if best >= min_w: return best
-    return best
-
 def originality_check(source_text, generated_text):
     src = norm_words(source_text); out = norm_words(generated_text)
     if len(out) < 100: return False, "matéria curta demais"
-    src8, out8 = ngrams(src, 8), ngrams(out, 8)
+    src8, out8 = {" ".join(src[i:i+8]) for i in range(max(0, len(src)-7))}, {" ".join(out[i:i+8]) for i in range(max(0, len(out)-7))}
     overlap = len(src8 & out8) / max(1, min(len(src8), len(out8)))
-    longest = longest_common_phrase(src, out)
-    if longest >= 15: return False, f"sequência de {longest} palavras iguais"
     if overlap > 0.12: return False, f"sobreposição 8-gram alta ({overlap:.3f})"
     return True, "OK"
 
-def _ai_extract_text(provider, response):
+def _provider_text(provider, response):
+    if provider.startswith("gemini"): return (getattr(response, "text", None) or "").strip()
     ch = response.get("choices") or []
     if not ch: return ""
     msg = ch[0].get("message") or {}
     c = msg.get("content") or ""
-    if isinstance(c, list):
-        c = "".join(str(i.get("text") or "") for i in c if isinstance(i, dict) and i.get("type") == "text")
+    if isinstance(c, list): c = "".join(str(i.get("text") or "") for i in c if isinstance(i, dict) and i.get("type") == "text")
     return str(c).strip()
 
-def _provider_is_quota_error(status, body):
-    t = str(body or "").upper()
-    return status == 429 or any(x in t for x in ("RESOURCE_EXHAUSTED","RATE LIMIT","RATE_LIMIT","QUOTA","TOO MANY REQUESTS","DAILY LIMIT","LIMIT EXCEEDED"))
-
-def _call_http_provider(provider, api_key, model, prompt):
+def _provider_request(provider, api_key, model, prompt):
+    if provider.startswith("gemini"):
+        return gemini_request(genai.Client(api_key=api_key), model, prompt)
     endpoint = {"groq":"https://api.groq.com/openai/v1/chat/completions","mistral":"https://api.mistral.ai/v1/chat/completions"}.get(provider)
-    if not endpoint: raise ValueError(f"Provedor HTTP desconhecido: {provider}")
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2, "max_tokens": 5000, "response_format": {"type": "json_object"}}
     if provider == "groq": payload["include_reasoning"] = False
-    r = requests.post(endpoint, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=AI_PROVIDER_TIMEOUT)
-    body = r.text[:1200]
-    if _provider_is_quota_error(r.status_code, body): raise RuntimeError(f"QUOTA_HTTP_{r.status_code}: {body}")
-    if r.status_code >= 400: raise RuntimeError(f"HTTP_{r.status_code}: {body}")
-    try: return r.json()
-    except Exception as exc: raise RuntimeError(f"JSON inválido do {provider}: {exc}")
-
-def _build_ai_providers():
-    p = []
-    if GEMINI_API_KEY: p.append(("gemini", GEMINI_API_KEY, GEMINI_MODEL_TEXT))
-    if GEMINI_API_KEY_2: p.append(("gemini-2", GEMINI_API_KEY_2, GEMINI_FALLBACK_MODEL))
-    if GROQ_API_KEY: p.append(("groq", GROQ_API_KEY, GROQ_MODEL))
-    if MISTRAL_API_KEY: p.append(("mistral", MISTRAL_API_KEY, MISTRAL_MODEL))
-    return p
-
-def _provider_request(provider, api_key, model, prompt):
-    if provider.startswith("gemini"): return gemini_request(genai.Client(api_key=api_key), model, prompt)
-    return _call_http_provider(provider, api_key, model, prompt)
-
-def _provider_text(provider, response):
-    if provider.startswith("gemini"): return (getattr(response, "text", None) or "").strip()
-    return _ai_extract_text(provider, response)
-
-def _is_quota_exception(exc):
-    m = str(exc).upper()
-    return any(x in m for x in ("429","RESOURCE_EXHAUSTED","QUOTA","RATE LIMIT","RATE_LIMIT","TOO MANY REQUESTS","DAILY LIMIT","LIMIT EXCEEDED"))
+    r = requests.post(endpoint, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=90)
+    if r.status_code >= 400: raise RuntimeError(f"HTTP_{r.status_code}")
+    return r.json()
 
 def gemini(article, client=None):
     global gemini_calls, gemini_quota_hit, _ai_config_logged
     if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN: return None
-    providers = _build_ai_providers()
-    if not _ai_config_logged:
-        print(f"IA: Gemini={'SIM' if GEMINI_API_KEY else 'NÃO'} | Gemini-2={'SIM' if GEMINI_API_KEY_2 else 'NÃO'} | Groq={'SIM' if GROQ_API_KEY else 'NÃO'} | Mistral={'SIM' if MISTRAL_API_KEY else 'NÃO'}")
-        _ai_config_logged = True
+    providers = []
+    if GEMINI_API_KEY: providers.append(("gemini", GEMINI_API_KEY, GEMINI_MODEL_TEXT))
+    if GEMINI_API_KEY_2: providers.append(("gemini-2", GEMINI_API_KEY_2, GEMINI_FALLBACK_MODEL))
+    if GROQ_API_KEY: providers.append(("groq", GROQ_API_KEY, GROQ_MODEL))
+    if MISTRAL_API_KEY: providers.append(("mistral", MISTRAL_API_KEY, MISTRAL_MODEL))
     if not providers: return None
 
     prompt = f"""
 Você é um jornalista especializado em tecnologia, Linux e Open Source.
 Escreva uma matéria NOVA e ORIGINAL, em português do Brasil.
-
 REGRAS:
 1. Traduza para pt-BR.
 2. Use SOMENTE fatos do texto-fonte. Não invente nada.
 3. A matéria deve ter 700 a 1200 palavras.
-4. Não diga que foi escrita por IA.
-5. Título novo e jornalístico; resumo de 2-3 frases.
-6. Não copie frases/parágrafos da fonte.
-
-Se for sobre assunto completamente alheio a tecnologia, marque publicar=false.
+4. Título novo e jornalístico; resumo de 2-3 frases.
+5. Não copie frases/parágrafos da fonte.
+6. Se for sobre assunto alheio a tecnologia, marque publicar=false.
 
 Retorne SOMENTE JSON válido:
 {{"publicar":true,"titulo":"...","resumo":"...","materia":"...","assunto_principal":"...","palavras_chave":["..."],"categoria_seo":"..."}}
@@ -671,7 +548,7 @@ TEXTO-FONTE:
 
     exhausted = set(); last_reason = "erro"
     for pass_index in range(2):
-        pp = prompt if pass_index == 0 else prompt + "\n\nATENÇÃO: reescreva totalmente, variando construções."
+        pp = prompt if pass_index == 0 else prompt + "\n\nATENÇÃO: reescreva totalmente."
         for provider, api_key, model in providers:
             if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN: break
             if provider in exhausted: continue
@@ -697,13 +574,10 @@ TEXTO-FONTE:
                         "palavras_chave": palavras[:SEO_KEYWORDS_MAX],
                         "categoria_seo": str(data.get("categoria_seo","")).strip()}
             except Exception as exc:
-                if _is_quota_exception(exc): exhausted.add(provider); last_reason = "quota"
+                if any(x in str(exc).upper() for x in ("429","RESOURCE_EXHAUSTED","QUOTA","RATE LIMIT")): exhausted.add(provider); last_reason = "quota"
                 else: last_reason = "erro"
-
     if last_reason == "quota": gemini_quota_hit = True
     return None
-
-# ============== SEO ==============
 
 def _truncate(text, limit):
     text = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -719,12 +593,9 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
     assunto = str(generated.get("assunto_principal","")).strip()
     cat = str(generated.get("categoria_seo","")).strip()
     palavras = list(generated.get("palavras_chave", []) or [])
-
     title = tb
     if SEO_TITLE_SUFFIX and not title.lower().endswith(SEO_TITLE_SUFFIX.lower()): title = f"{tb}{SEO_TITLE_SUFFIX}"
-
-    description = _truncate(resumo or _strip_html(materia)[:SEO_DESCRIPTION_MAX], SEO_DESCRIPTION_MAX)
-
+    description = _truncate(resumo or re.sub(r"\s+", " ", BeautifulSoup(materia, "html.parser").get_text(" ", strip=True))[:SEO_DESCRIPTION_MAX], SEO_DESCRIPTION_MAX)
     kw = []
     if assunto: kw.append(assunto)
     if cat: kw.append(cat)
@@ -734,7 +605,6 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
     for fb in ("linux","open source","tecnologia","notícias de tecnologia", BLOG_NAME):
         if fb.lower() not in {k.lower() for k in kw}: kw.append(fb)
     keywords = ", ".join(kw[:SEO_KEYWORDS_MAX])
-
     labels = ["Notícias","Tecnologia","Linux","Open Source"]
     if cat and cat not in labels: labels.append(cat)
     if assunto and assunto not in labels and len(assunto) <= 40: labels.append(assunto)
@@ -747,15 +617,12 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
         if k in seen: continue
         seen.add(k); labels_final.append(l)
     labels_final = labels_final[:10]
-
     image_url = final_image or article.get("image","")
     canonical = article.get("url","")
     published = (article.get("date") or datetime.now()).isoformat()
     date_modified = datetime.now().isoformat()
-
     schema = {"@context":"https://schema.org","@type":"NewsArticle","mainEntityOfPage":{"@type":"WebPage","@id":canonical},"headline":tb[:110],"description":description,"image":[image_url] if image_url else [],"datePublished":published,"dateModified":date_modified,"author":{"@type":"Organization","name":BLOG_NAME,"url":BLOG_HOME_URL},"publisher":{"@type":"Organization","name":BLOG_NAME,"url":BLOG_HOME_URL,"logo":{"@type":"ImageObject","url":image_url or f"{BLOG_HOME_URL}/favicon.ico"}},"articleSection":cat or "Tecnologia","keywords":keywords,"inLanguage":"pt-BR","isAccessibleForFree":True,"url":canonical,"sourceOrganization":{"@type":"Organization","name":urlparse(canonical).netloc,"url":canonical}}
     breadcrumb = {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Início","item":BLOG_HOME_URL},{"@type":"ListItem","position":2,"name":"Notícias","item":f"{BLOG_HOME_URL}/search/label/Not%C3%ADcias"},{"@type":"ListItem","position":3,"name":tb[:80],"item":canonical}]}
-
     st = title.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
     sd = description.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
     sk = keywords.replace("&","&amp;").replace('"',"&quot;")
@@ -783,8 +650,6 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
 <!-- ===== FIM SEO ===== -->"""
     return {"title":title,"titulo_base":tb,"description":description,"keywords":keywords,"labels":labels_final,"canonical":canonical,"schema":schema,"breadcrumb":breadcrumb,"html_head":html_head,"source_url":article.get("url",""),"assunto":assunto,"categoria_seo":cat}
 
-def build_seo_head_for_blogger(seo): return seo.get("html_head","")
-
 def _render_inline_image_html(img_url, alt_text):
     si = (img_url or "").replace("&","&amp;").replace('"',"&quot;")
     sa = (alt_text or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
@@ -802,11 +667,10 @@ def html(article, generated, final_image="", image_origin="", seo=None):
     iu = final_image or article["image"]
     si = iu.replace("&","&amp;").replace('"',"&quot;")
     ss = article["url"].replace("&","&amp;").replace('"',"&quot;")
-    head = build_seo_head_for_blogger(seo)
+    head = seo.get("html_head","")
     content = []
     if head: content.append(head)
     content.extend([f'<p><strong>{generated["resumo"]}</strong></p>', f'<p><img src="{si}" alt="{st}" title="{st}" width="1200" height="630" style="max-width:100%;height:auto;border-radius:12px;"></p>'])
-
     paras = [p.strip() for p in re.split(r"\n+", generated["materia"]) if p.strip()]
     imgs = list(article.get("inline_images") or [])[:1]
     imgs.sort(key=lambda x: x.get("after_paragraph", 9999))
@@ -821,29 +685,30 @@ def html(article, generated, final_image="", image_origin="", seo=None):
         if r: parts.append(r)
     while idx < total: parts.append(f"<p>{paras[idx]}</p>"); idx += 1
     content.extend(parts)
-
     for vu in article["videos"]:
         content.append('<div style="margin:24px 0;"><div style="position:relative;width:100%;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;">'
                        f'<iframe src="{vu}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" frameborder="0" allowfullscreen loading="lazy"></iframe>'
                        '</div></div>')
-
     src_marker = f"<!-- SUPORTE_DISTROS_LINUX_BR_SOURCE_URL: {ss} -->"
     img_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_IMAGE_SOURCE: {image_origin} -->" if image_origin else ""
     seo_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_SEO_DESCRIPTION: {seo.get('description','')[:300]} -->\n<!-- SUPORTE_DISTROS_LINUX_BR_SEO_KEYWORDS: {seo.get('keywords','')[:300]} -->" if seo else ""
     return "\n".join(content) + "\n" + src_marker + img_marker + seo_marker
 
+# ============== MAIN ==============
 def main():
-    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Imagem por distro | Duplicidade (seq + termos raros)")
+    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Bloqueio por Assunto")
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
-    old_blog_urls, old_source_urls, existing_contents, existing_posts = existing(api)
+    
+    # 1. Pega os títulos recentes
+    recent_titles = get_recent_titles(api)
+    print(f"Posts recentes verificados: {len(recent_titles)}")
+    for t in recent_titles:
+        print(f"  - {t[:80]}...")
 
-    if CLEAN_DUPLICATES:
-        print("CLEAN_DUPLICATES=true → limpando duplicatas...")
-        clean_duplicates(api, existing_posts)
-        old_blog_urls, old_source_urls, existing_contents, existing_posts = existing(api, show_log=False)
-
+    old_blog_urls, old_source_urls, existing_contents, _ = existing(api)
     posts_count = count_bot_posts(api)
+
     candidates = []; candidate_urls = set(); source_counts = {}; prefiltered = 0
     for source in SOURCES:
         sl = links(source)
@@ -862,24 +727,33 @@ def main():
     print(f"Novas matérias de tecnologia: {len(candidates)}")
 
     published = 0; failed = 0; ignored = 0; dups = 0
+    
     while candidates and published < MAX_POSTS_PER_RUN:
         art = candidates.pop(0)
         n = normalize_url(art["url"])
         if n in old_source_urls: ignored += 1; continue
 
-        is_dup, motivo, sim, ref_title = check_duplicate(art, existing_contents)
-        if is_dup:
-            print(f"⚠ Duplicata ({motivo}, sim={sim:.2f}) de «{ref_title[:60]}» — pulando")
-            dups += 1; ignored += 1; continue
+        if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
+            break
 
-        if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN: break
-
+        # Gera a matéria com a IA
         gen = gemini(art, gen_client)
         if not gen:
             ignored += 1
             if gemini_quota_hit: break
             continue
 
+        # AQUI ESTÁ A CORREÇÃO: Verifica se o ASSUNTO do novo título já está nos recentes
+        final_title = gen.get("titulo", "")
+        is_dup, dup_title = is_subject_duplicate(final_title, recent_titles)
+        
+        if is_dup:
+            print(f"⚠ Duplicata de assunto: «{final_title[:60]}» já foi falado em «{dup_title[:60]}» — pulando para a próxima matéria.")
+            dups += 1
+            ignored += 1
+            continue
+
+        # Se não for duplicata, prossegue com imagem, SEO e publicação
         distro = detect_distro_from_title(art.get("title","") or gen.get("titulo",""))
         final_image = ""; image_origin = ""
         if distro:
@@ -901,7 +775,8 @@ def main():
             resp = api.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body, isDraft=False).execute()
             published += 1
             old_source_urls.add(n)
-            existing_contents.append((seo["title"], _strip_html(post_body["content"])))
+            # Adiciona o novo título aos recentes para o mesmo run
+            recent_titles.append(seo["title"])
 
             if resp.get("url"):
                 old_blog_urls.add(normalize_url(resp["url"]))
@@ -919,9 +794,9 @@ def main():
     print("RESULTADO")
     print(f"Publicações: {published}")
     print(f"Ignoradas: {ignored}")
-    print(f"Duplicatas de conteúdo: {dups}")
+    print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 1.9 ATIVA: imagem por distro | fallback 12 | duplicidade por SEQUÊNCIA + TERMOS RAROS | CLEAN_DUPLICATES | PT-BR | SEO | Blogger")
+print("VERSÃO 2.1 ATIVA: Bloqueio por Assunto Recente | Imagem por distro | SEO | Blogger")
 
 main()
