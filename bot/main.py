@@ -33,7 +33,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 2.1 (Bloqueio por Assunto Recente)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 2.2 (Bloqueio por Assunto Recente)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -45,12 +45,16 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 BLOG_NAME = os.getenv("BLOG_NAME", "Suporte Distros Linux BR").strip() or "Suporte Distros Linux BR"
 BLOG_HOME_URL = os.getenv("BLOG_HOME_URL", "https://suportedistroslinuxbr.blogspot.com").strip().rstrip("/")
 BLOG_LOCALE = os.getenv("BLOG_LOCALE", "pt_BR").strip() or "pt_BR"
+BLOG_TWITTER = os.getenv("BLOG_TWITTER", "").strip()
 SEO_TITLE_SUFFIX = os.getenv("SEO_TITLE_SUFFIX", f" | {BLOG_NAME}").strip()
 SEO_DESCRIPTION_MAX = int(os.getenv("SEO_DESCRIPTION_MAX", "160"))
 SEO_KEYWORDS_MAX = int(os.getenv("SEO_KEYWORDS_MAX", "12"))
 
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))
 MAX_GEMINI_TEXT_CALLS_PER_RUN = int(os.getenv("MAX_GEMINI_TEXT_CALLS_PER_RUN", "6"))
+GEMINI_MAX_RETRIES = 3
+GEMINI_RETRY_BASE_SECONDS = 4
+MAX_LINKS_PER_SOURCE = 80  # <--- CORRIGIDO AQUI (variável que faltava)
 MAX_AGE_DAYS = 3650
 MIN_SOURCE_CHARS = 500
 MIN_SOURCE_PARAGRAPHS = 3
@@ -149,7 +153,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/2.1)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/2.2)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -308,17 +312,19 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
-# ============== DUPLICIDADE POR ASSUNTO (A CORREÇÃO) ==============
+# ============== DUPLICIDADE POR ASSUNTO ==============
 
 def get_recent_titles(api):
     """Busca os títulos dos últimos N posts publicados no blog."""
     titles = []
     try:
+        # Força a ordenação por data de publicação (mais recentes primeiro)
         response = api.posts().list(
             blogId=BLOGGER_BLOG_ID,
             maxResults=RECENT_POSTS_TO_CHECK,
             fetchBodies=False,
-            status="live"
+            status="live",
+            orderBy="published"
         ).execute()
         for post in response.get("items", []):
             titles.append(post.get("title", ""))
@@ -339,13 +345,11 @@ def extract_rare_terms_from_title(title):
     """Extrai palavras-chave do título (ex: fedora, 45, gnome, kde)."""
     terms = set()
     raw = str(title)
-    # Pega nomes próprios, siglas e números (ex: Fedora, 45, GNOME)
     for pat in _RARE_TOKEN_PATTERNS:
         for m in pat.finditer(raw):
             term = re.sub(r"\s+", " ", _tech_norm(m.group(0))).strip()
             if len(term) < 3 or term in _GENERIC_NEWS_TERMS or term in _STOPWORDS_PT: continue
             terms.add(term)
-    # Pega palavras técnicas longas (ex: linux, plasma, podman)
     for w in re.findall(r"\b[a-z]{5,}\b", _tech_norm(raw)):
         if w not in _GENERIC_NEWS_TERMS and w not in _STOPWORDS_PT: terms.add(w)
     return terms
@@ -353,7 +357,6 @@ def extract_rare_terms_from_title(title):
 def is_subject_duplicate(new_title, recent_titles):
     """
     Verifica se o assunto (palavras-chave) do novo título já foi falado nos títulos recentes.
-    Ex: Se novo título tem "Fedora 45", e algum recente tem "Fedora 45", bloqueia.
     """
     new_terms = extract_rare_terms_from_title(new_title)
     if not new_terms:
@@ -363,18 +366,13 @@ def is_subject_duplicate(new_title, recent_titles):
         old_terms = extract_rare_terms_from_title(old_title)
         if not old_terms:
             continue
-        
-        # Interseção: quais palavras-chave do novo título já estão no título antigo?
         common_terms = new_terms & old_terms
-        
         # Se compartilham 2 ou mais termos importantes, consideramos o mesmo assunto.
-        # Ex: "fedora" e "45", ou "gnome" e "51".
         if len(common_terms) >= 2:
             return True, old_title
-            
     return False, ""
 
-# ============== ARTIGO, IA, SEO, HTML (mantidos) ==============
+# ============== ARTIGO ==============
 
 def get_article(url):
     x = soup(url)
@@ -473,15 +471,15 @@ def is_transient_gemini_error(exc):
 
 def gemini_request(client, model, prompt):
     last = None
-    for attempt in range(1, 4):
+    for attempt in range(1, GEMINI_MAX_RETRIES + 1):
         try:
             with contextlib.redirect_stderr(io.StringIO()):
                 return client.models.generate_content(model=model, contents=prompt, config={"response_mime_type": "application/json"})
         except Exception as e:
             last = e; m = str(e).upper()
             if "429" in m or "RESOURCE_EXHAUSTED" in m: raise
-            if not is_transient_gemini_error(e) or attempt >= 3: raise
-            time.sleep(4 * (2 ** (attempt-1)) + random.uniform(0,2))
+            if not is_transient_gemini_error(e) or attempt >= GEMINI_MAX_RETRIES: raise
+            time.sleep(GEMINI_RETRY_BASE_SECONDS * (2 ** (attempt-1)) + random.uniform(0,2))
     raise last
 
 def norm_words(text):
@@ -797,6 +795,6 @@ def main():
     print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 2.1 ATIVA: Bloqueio por Assunto Recente | Imagem por distro | SEO | Blogger")
+print("VERSÃO 2.2 ATIVA: Bloqueio por Assunto Recente | Imagem por distro | SEO | Blogger")
 
 main()
