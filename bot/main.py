@@ -47,7 +47,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 1.4 (Apenas 1 imagem extra: og:image da origem, após o 2º parágrafo)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 1.5 (Apenas 1 imagem extra: og:image da origem, após o 2º parágrafo)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -173,6 +173,20 @@ SOURCES = [
         "section_only": True,
         "path_prefix": "/linux/",
     },
+    {
+        "nome": "Linuxize",
+        "url": "https://linuxize.com/",
+        "feeds": [
+            "https://linuxize.com/index.xml",
+        ],
+    },
+    {
+        "nome": "It's FOSS",
+        "url": "https://itsfoss.com/",
+        "feeds": [
+            "https://itsfoss.com/rss/",
+        ],
+    },
 ]
 
 BAD_PATHS = (
@@ -207,7 +221,7 @@ VIDEO_HOSTS = (
 )
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/1.4)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/1.5)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -1301,7 +1315,7 @@ def html(article, generated, final_image="", image_origin="", seo=None):
 
 
 def main():
-    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux | Tradução PT-BR | Sequência de imagens")
+    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | Tradução PT-BR | Sequência de imagens")
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
     old_blog_urls, old_source_urls = existing(api)
@@ -1432,6 +1446,6 @@ def main():
     print(f"Falhas: {failed}")
 
 
-print("VERSÃO 1.4 ATIVA: Tradução PT-BR | sequência de 12 imagens do repositório | apenas 1 imagem extra da origem (após o 2º parágrafo) | SEO automático | Blogger")
+print("VERSÃO 1.5 ATIVA: Tradução PT-BR | sequência de 12 imagens do repositório | apenas 1 imagem extra da origem (após o 2º parágrafo) | SEO automático | Blogger")
 
 main()
