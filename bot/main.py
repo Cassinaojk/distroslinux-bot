@@ -2,6 +2,7 @@ import os, re, json, requests, time, random, io, contextlib, unicodedata, warnin
 import builtins
 from difflib import SequenceMatcher
 from datetime import datetime, date, timezone, timedelta
+import numpy as np  # Necessário para cálculo de similaridade
 
 _VERBOSE_LOG = os.getenv("VERBOSE_LOG", "false").lower() in ("1", "true", "yes", "sim")
 _original_print = builtins.print
@@ -34,7 +35,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.0 (Filtro de Data + Verificação API)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.1 (Detecção Semântica de Duplicatas)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -56,12 +57,14 @@ MAX_GEMINI_TEXT_CALLS_PER_RUN = int(os.getenv("MAX_GEMINI_TEXT_CALLS_PER_RUN", "
 GEMINI_MAX_RETRIES = 3
 GEMINI_RETRY_BASE_SECONDS = 4
 MAX_LINKS_PER_SOURCE = 80
-# MUDANÇA CRÍTICA: Só aceita notícias de hoje. Se quiser incluir ontem, mude para 1.
 MAX_AGE_DAYS = 0 
 MIN_SOURCE_CHARS = 500
 MIN_SOURCE_PARAGRAPHS = 3
 TIMEOUT = 25
-RECENT_POSTS_TO_CHECK = 30 
+RECENT_POSTS_TO_CHECK = 30
+
+# Limiar de similaridade para considerar duplicata (0.85 = 85% de similaridade)
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.85"))
 
 GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
@@ -137,11 +140,92 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.0)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.1)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
 _ai_config_logged = False
+
+# ============== FUNÇÕES DE EMBEDDING (NOVO) ==============
+
+def get_embedding(text, client):
+    """Gera um embedding para o texto usando a API do Gemini."""
+    try:
+        # Limita o texto para não estourar o limite de tokens do embedding
+        text = text[:8000]
+        result = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text,
+        )
+        return result.embeddings[0].values
+    except Exception as e:
+        print(f"Erro ao gerar embedding: {e}")
+        return None
+
+def cosine_similarity(vec1, vec2):
+    """Calcula a similaridade de cosseno entre dois vetores."""
+    if vec1 is None or vec2 is None:
+        return 0.0
+    v1 = np.array(vec1)
+    v2 = np.array(vec2)
+    dot = np.dot(v1, v2)
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot / (norm1 * norm2)
+
+def get_recent_embeddings(api, gen_client, limit=20):
+    """Busca os últimos N posts e gera embeddings para seus títulos + resumos."""
+    embeddings_data = []
+    try:
+        response = api.posts().list(
+            blogId=BLOGGER_BLOG_ID,
+            maxResults=limit,
+            fetchBodies=True,
+            status="live",
+            orderBy="published"
+        ).execute()
+        
+        for post in response.get("items", []):
+            title = post.get("title", "")
+            content = post.get("content", "")
+            # Extrai um resumo do conteúdo (primeiros 300 caracteres de texto visível)
+            soup = BeautifulSoup(content, "html.parser")
+            visible_text = soup.get_text(" ", strip=True)[:300]
+            text_to_embed = f"{title} {visible_text}"
+            
+            emb = get_embedding(text_to_embed, gen_client)
+            if emb:
+                embeddings_data.append({
+                    "title": title,
+                    "url": post.get("url", ""),
+                    "embedding": emb
+                })
+    except Exception as e:
+        print(f"Erro ao buscar embeddings recentes: {e}")
+    
+    return embeddings_data
+
+def is_semantic_duplicate(new_title, new_resumo, recent_embeddings, gen_client):
+    """Verifica se o novo conteúdo é semanticamente similar a algum post recente."""
+    if not recent_embeddings:
+        return False, ""
+    
+    new_text = f"{new_title} {new_resumo}"
+    new_emb = get_embedding(new_text, gen_client)
+    
+    if not new_emb:
+        return False, ""
+    
+    for item in recent_embeddings:
+        sim = cosine_similarity(new_emb, item["embedding"])
+        if sim >= SIMILARITY_THRESHOLD:
+            return True, f"{item['title'][:60]} (similaridade: {sim:.2f})"
+    
+    return False, ""
+
+# ============== FUNÇÕES AUXILIARES ==============
 
 def normalize_url(u):
     if not u: return ""
@@ -296,94 +380,6 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
-# ============== DUPLICIDADE POR ASSUNTO (VIA API) ==============
-
-def get_recent_titles(api):
-    """Busca os títulos dos últimos N posts publicados no blog."""
-    titles = []
-    try:
-        response = api.posts().list(
-            blogId=BLOGGER_BLOG_ID,
-            maxResults=RECENT_POSTS_TO_CHECK,
-            fetchBodies=False,
-            status="live",
-            orderBy="published"
-        ).execute()
-        for post in response.get("items", []):
-            titles.append(post.get("title", ""))
-    except Exception as e:
-        print(f"Erro ao buscar títulos recentes: {e}")
-    return titles
-
-def extract_keywords(title):
-    """Extrai palavras-chave reais do título (nomes próprios, versões, etc)."""
-    norm = _tech_norm(title)
-    words = set(re.findall(r"\b[a-z]{4,}\b", norm))
-    numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", norm))
-    # Remove palavras genéricas de notícias para focar no assunto real
-    return (words | numbers) - _STOPWORDS_PT
-
-def is_subject_duplicate(new_title, recent_titles):
-    """Verifica se o assunto (palavras-chave) do novo título já foi falado nos títulos recentes."""
-    new_kw = extract_keywords(new_title)
-    if not new_kw:
-        return False, ""
-
-    for old_title in recent_titles:
-        old_kw = extract_keywords(old_title)
-        if not old_kw:
-            continue
-
-        common = new_kw & old_kw
-        # Se compartilham 2 ou mais palavras-chave importantes, é o mesmo assunto.
-        if len(common) >= 2:
-            return True, old_title
-            
-        # Bônus: Se for só 1 palavra, mas for o nome de uma distro, bloqueia.
-        if len(common) == 1:
-            word = list(common)[0]
-            if word in DISTRO_BASE_NAMES.values() or word in ("linux", "ubuntu", "fedora", "debian", "arch", "mint", "kali"):
-                return True, old_title
-
-    return False, ""
-
-def check_blogger_for_duplicate(api, article_title):
-    """
-    NOVA VERIFICAÇÃO: Usa a API de busca do Blogger para ver se já existe
-    um post com as palavras-chave principais da notícia.
-    """
-    keywords = extract_keywords(article_title)
-    if not keywords:
-        return False, ""
-    
-    # Pega as 2 palavras mais longas como termos de busca (ex: "fedora" e "plasma")
-    search_terms = sorted(list(keywords), key=len, reverse=True)[:2]
-    query = " ".join(search_terms)
-    
-    try:
-        # Busca no blog por esses termos
-        response = api.posts().search(
-            blogId=BLOGGER_BLOG_ID,
-            q=query,
-            fetchBodies=False,
-            maxResults=5
-        ).execute()
-        
-        for post in response.get("items", []):
-            post_title = post.get("title", "")
-            # Se o título do post encontrado também for similar, é duplicata certa.
-            if is_subject_duplicate(post_title, [article_title])[0]:
-                return True, post_title
-            # Se a busca retornou algo com o mesmo termo, já é suspeito.
-            if any(term in _tech_norm(post_title) for term in search_terms):
-                return True, post_title
-                
-    except Exception as e:
-        # Se a API falhar, apenas ignora e segue para a verificação de títulos
-        pass
-        
-    return False, ""
-
 # ============== ARTIGO ==============
 
 def get_article(url):
@@ -396,14 +392,12 @@ def get_article(url):
     
     d = article_date(x)
     if d:
-        # FILTRO RIGOROSO DE DATA: Só aceita notícias de hoje (ou futuro, se houver fuso)
         now = datetime.now()
         age = (now - d).total_seconds() / 86400
         if age > MAX_AGE_DAYS:
             print(f"⚠ Notícia antiga (publicada em {d.strftime('%d/%m/%Y')}). Pulando.")
             return None
     else:
-        # Se não tem data, tenta seguir, mas é arriscado.
         print("Data não identificada. Aceitando para análise.")
         d = datetime.now()
 
@@ -463,7 +457,6 @@ def blogger():
 
 def existing(api, show_log=True):
     blog_urls, source_urls = set(), set()
-    existing_contents = []
     token = None
     try:
         while True:
@@ -474,18 +467,17 @@ def existing(api, show_log=True):
                 post_url = normalize_url(post.get("url",""))
                 if post_url: blog_urls.add(post_url)
                 content = post.get("content","") or ""
-                title = post.get("title","") or ""
                 for m in re.findall(r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I): source_urls.add(normalize_url(m))
                 for m in re.findall(r'SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I): source_urls.add(normalize_url(m))
-                clean = re.sub(r"\s+", " ", BeautifulSoup(content, "html.parser").get_text(" ", strip=True)).strip()
-                if clean and len(clean) > 200: existing_contents.append((title, clean))
             token = data.get("nextPageToken")
             if not token: break
     except Exception as e: print("Erro ao consultar Blogger:", e)
     if show_log:
         print("Posts existentes no Blogger:", len(blog_urls))
         print("Fontes já registradas:", len(source_urls))
-    return blog_urls, source_urls, existing_contents
+    return blog_urls, source_urls
+
+# ============== IA ==============
 
 def is_transient_gemini_error(exc):
     m = str(exc).upper()
@@ -598,6 +590,8 @@ TEXTO-FONTE:
                 else: last_reason = "erro"
     if last_reason == "quota": gemini_quota_hit = True
     return None
+
+# ============== SEO E HTML ==============
 
 def _truncate(text, limit):
     text = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -716,17 +710,16 @@ def html(article, generated, final_image="", image_origin="", seo=None):
 
 # ============== MAIN ==============
 def main():
-    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Filtro de Data + Bloqueio API")
+    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Detecção Semântica")
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
     
-    # 1. Pega os títulos recentes para verificação local
-    recent_titles = get_recent_titles(api)
-    print(f"Posts recentes verificados: {len(recent_titles)}")
-    for t in recent_titles:
-        print(f"  - {t[:80]}...")
+    # 1. Busca embeddings dos posts recentes (NOVO)
+    print("Buscando embeddings de posts recentes para comparação semântica...")
+    recent_embeddings = get_recent_embeddings(api, gen_client, limit=RECENT_POSTS_TO_CHECK)
+    print(f"Posts recentes com embeddings carregados: {len(recent_embeddings)}")
 
-    old_blog_urls, old_source_urls, _ = existing(api)
+    old_blog_urls, old_source_urls = existing(api)
     posts_count = count_bot_posts(api)
 
     candidates = []; candidate_urls = set(); source_counts = {}; prefiltered = 0
@@ -753,14 +746,6 @@ def main():
         n = normalize_url(art["url"])
         if n in old_source_urls: ignored += 1; continue
 
-        # VERIFICAÇÃO 1: API do Blogger (busca por termos)
-        is_dup_api, dup_title_api = check_blogger_for_duplicate(api, art["title"])
-        if is_dup_api:
-            print(f"⚠ Duplicata de assunto (via API): «{art['title'][:60]}» já existe como «{dup_title_api[:60]}» — pulando.")
-            dups += 1
-            ignored += 1
-            continue
-
         if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
             break
 
@@ -771,12 +756,16 @@ def main():
             if gemini_quota_hit: break
             continue
 
-        # VERIFICAÇÃO 2: Título gerado pela IA vs Títulos recentes
-        final_title = gen.get("titulo", "")
-        is_dup_local, dup_title_local = is_subject_duplicate(final_title, recent_titles)
+        # VERIFICAÇÃO SEMÂNTICA (NOVO)
+        is_dup, dup_reason = is_semantic_duplicate(
+            gen.get("titulo", ""), 
+            gen.get("resumo", ""), 
+            recent_embeddings, 
+            gen_client
+        )
         
-        if is_dup_local:
-            print(f"⚠ Duplicata de assunto (local): «{final_title[:60]}» já foi falado em «{dup_title_local[:60]}» — pulando.")
+        if is_dup:
+            print(f"⚠ Duplicata de assunto (semântica): «{gen.get('titulo','')[:60]}» é similar a «{dup_reason}» — pulando.")
             dups += 1
             ignored += 1
             continue
@@ -803,7 +792,15 @@ def main():
             resp = api.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body, isDraft=False).execute()
             published += 1
             old_source_urls.add(n)
-            recent_titles.append(seo["title"])
+
+            # Adiciona o novo post à lista de embeddings para evitar duplicatas na mesma execução
+            new_emb = get_embedding(f"{gen['titulo']} {gen['resumo']}", gen_client)
+            if new_emb:
+                recent_embeddings.append({
+                    "title": seo["title"],
+                    "url": resp.get("url", ""),
+                    "embedding": new_emb
+                })
 
             if resp.get("url"):
                 old_blog_urls.add(normalize_url(resp["url"]))
@@ -824,6 +821,6 @@ def main():
     print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.0 ATIVA: Filtro de Data (Hoje) + Bloqueio via API + Bloqueio Local | Imagem por distro | SEO")
+print("VERSÃO 3.1 ATIVA: Detecção Semântica de Duplicatas | Filtro de Data (Hoje) | Imagem por distro | SEO")
 
 main()
