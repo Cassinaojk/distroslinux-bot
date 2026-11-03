@@ -1,5 +1,6 @@
 import os, re, json, requests, time, random, io, contextlib, unicodedata, warnings
 import builtins
+from difflib import SequenceMatcher
 
 # Log resumido por padrão. Use VERBOSE_LOG=true no GitHub Actions para diagnóstico.
 _VERBOSE_LOG = os.getenv("VERBOSE_LOG", "false").lower() in ("1", "true", "yes", "sim")
@@ -16,9 +17,11 @@ def print(*args, **kwargs):
         or message.startswith("Fontes:")
         or message.startswith("Posts existentes no Blogger:")
         or message.startswith("Fontes já registradas:")
+        or message.startswith("Conteúdos indexados")
         or message.startswith("Fontes encontradas:")
         or message.startswith("Novas matérias:")
         or message.startswith("Puladas:")
+        or message.startswith("Duplicatas de conteúdo:")
         or message == "RESULTADO"
         or message.startswith("Publicações:")
         or message.startswith("Ignoradas:")
@@ -32,6 +35,7 @@ def print(*args, **kwargs):
         or message.startswith("⚠ Gemini:")
         or message.startswith("⚠ Imagem:")
         or message.startswith("⚠ Pulada:")
+        or message.startswith("⚠ Duplicata:")
         or message.startswith("Erro ao consultar Blogger:")
         or message.startswith("Erro:")
     )
@@ -47,7 +51,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 1.5 (Apenas 1 imagem extra: og:image da origem, após o 2º parágrafo)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 1.7 (Imagem por distro + detecção de duplicidade por conteúdo)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -87,7 +91,15 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip()
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest").strip()
 AI_PROVIDER_TIMEOUT = int(os.getenv("AI_PROVIDER_TIMEOUT", "90"))
 
-# ===== Sequência de imagens do repositório =====
+# ===== Duplicidade =====
+# Limiar de similaridade de conteúdo (0.0 a 1.0). 0.65 = bloqueia reescritas parciais.
+CONTENT_DUPLICATE_THRESHOLD = float(os.getenv("CONTENT_DUPLICATE_THRESHOLD", "0.65"))
+# Se true, detecta posts duplicados já publicados e os reverte para rascunho.
+CLEAN_DUPLICATES = os.getenv("CLEAN_DUPLICATES", "false").lower() in ("1", "true", "yes", "sim")
+# Quantos caracteres do texto novo usar como assinatura (título + trecho inicial).
+CONTENT_SIGNATURE_CHARS = int(os.getenv("CONTENT_SIGNATURE_CHARS", "800"))
+
+# ===== Sequência de imagens do repositório (fallback quando não há distro no título) =====
 IMAGE_FILES = [
     "bot/imagens/Distribuições Linux (1).png",
     "bot/imagens/Distribuições Linux (2).png",
@@ -102,6 +114,35 @@ IMAGE_FILES = [
     "bot/imagens/Distribuições Linux (11).png",
     "bot/imagens/Distribuições Linux (12).png",
 ]
+
+# ===== Imagens específicas por distro (pasta bot/imagens/distros) =====
+DISTRO_BASE_NAMES = {
+    "arch": "arch",
+    "centos": "cent os",
+    "cent os": "cent os",
+    "debian": "debian",
+    "deepin": "deepin",
+    "elementary os": "elementary os",
+    "elementaryos": "elementary os",
+    "fedora": "fedora",
+    "kubuntu": "kubuntu",
+    "linux mint": "linux mint",
+    "mint": "linux mint",
+    "manjaro": "manjaro",
+    "pop os": "pop os",
+    "popos": "pop os",
+    "red hat": "red hat",
+    "redhat": "red hat",
+    "rhel": "red hat",
+    "suse": "suse",
+    "opensuse": "suse",
+    "ubuntu": "ubuntu",
+    "xubuntu": "xubuntu",
+    "zorin os": "zorin os",
+    "zorin": "zorin os",
+}
+
+DISTROS_IMAGE_DIR = "bot/imagens/distros"
 
 # ===== Filtro de Tecnologia/Linux =====
 LINUX_TERMS = (
@@ -118,6 +159,19 @@ LINUX_TERMS = (
     "computador", "pc", "portátil", "servidor", "rede", "internet",
     "segurança", "privacidade", "dados", "código", "desenvolvedor",
 )
+
+# ===== Stopwords PT para similaridade =====
+_STOPWORDS_PT = {
+    "a", "o", "e", "de", "da", "do", "das", "dos", "em", "no", "na",
+    "nos", "nas", "para", "por", "com", "sem", "sob", "sobre", "entre",
+    "que", "se", "como", "mais", "menos", "muito", "pouco", "já", "não",
+    "sim", "é", "são", "foi", "foram", "ser", "estar", "ter", "haver",
+    "este", "esta", "esse", "essa", "isso", "aquilo", "aquele", "aquela",
+    "um", "uma", "uns", "umas", "seu", "sua", "seus", "suas", "nosso",
+    "nossa", "nossas", "ele", "ela", "eles", "elas", "nós",
+    "vós", "eu", "tu", "você", "vocês", "ao", "aos", "à", "às", "pelo",
+    "pela", "pelos", "pelas", "num", "numa", "nuns", "numas",
+}
 
 def _tech_norm(value):
     value = unicodedata.normalize("NFKD", str(value or ""))
@@ -139,7 +193,6 @@ def is_tech_related(article=None, generated=None, raw_text=""):
     if not combined:
         return False
     return any(term in combined for term in LINUX_TERMS)
-
 
 # ===== Fontes =====
 SOURCES = [
@@ -221,7 +274,7 @@ VIDEO_HOSTS = (
 )
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/1.5)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/1.7)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -233,7 +286,6 @@ def normalize_url(u):
     u = u.strip().split("#")[0]
     u = u.rstrip("/")
     return u
-
 
 def bad_url(u):
     u = normalize_url(u).lower()
@@ -247,7 +299,6 @@ def bad_url(u):
     if re.search(r"\.(pdf|jpg|jpeg|png|gif|webp|svg|xml|zip)$", path):
         return True
     return False
-
 
 def soup(url, xml=False):
     try:
@@ -267,7 +318,6 @@ def soup(url, xml=False):
         print("Erro:", e)
         return None
 
-
 def date_parse(v):
     if not v:
         return None
@@ -286,7 +336,6 @@ def date_parse(v):
         except Exception:
             pass
     return None
-
 
 def article_date(x):
     selectors = (
@@ -330,7 +379,6 @@ def article_date(x):
                 return d
     return None
 
-
 def image_original(x):
     """Extrai APENAS a imagem de destaque (og:image) da postagem original."""
     for sel in (
@@ -348,7 +396,6 @@ def image_original(x):
             if u.startswith(("http://", "https://")):
                 return u
     return ""
-
 
 def videos(x):
     BLOCK_HOSTS = (
@@ -392,29 +439,78 @@ def videos(x):
             out.append(u)
     return out[:3]
 
-
 # ============================================================
-# SEQUÊNCIA DE IMAGENS DO REPOSITÓRIO
+# IMAGENS DO REPOSITÓRIO
 # ============================================================
 
 def resolve_repo_image_url(relative_path):
-    """Monta a URL direta para a imagem no repositório do GitHub."""
     if not relative_path:
         return ""
-    
     repository = os.getenv("GITHUB_REPOSITORY", "Cassinaojk/suportedistroslinuxbr")
     branch = os.getenv("GITHUB_REF_NAME", "main") or "main"
-    
-    # Codifica o caminho para lidar com espaços e acentos
     path_encoded = quote(relative_path, safe="/")
-    
-    # Usa o raw.githubusercontent.com que é mais rápido e confiável
-    url = f"https://raw.githubusercontent.com/{repository}/{branch}/{path_encoded}"
-    return url
+    return f"https://raw.githubusercontent.com/{repository}/{branch}/{path_encoded}"
 
+def detect_distro_from_title(title):
+    norm = _tech_norm(title)
+    if not norm:
+        return ""
+    for key in sorted(DISTRO_BASE_NAMES.keys(), key=len, reverse=True):
+        pattern = r"\b" + re.escape(key) + r"\b"
+        if re.search(pattern, norm):
+            return DISTRO_BASE_NAMES[key]
+    return ""
+
+def count_image_variants_in_blogger(api, base_name):
+    c1 = 0
+    c2 = 0
+    token = None
+    pattern = re.compile(
+        r"SUPORTE_DISTROS_LINUX_BR_IMAGE_SOURCE:\s*Distro:\s*" + re.escape(base_name) +
+        r"\s*\|\s*Variante:\s*(\d)",
+        re.I,
+    )
+    try:
+        while True:
+            kwargs = {
+                "blogId": BLOGGER_BLOG_ID,
+                "maxResults": 500,
+                "fetchBodies": True,
+            }
+            if token:
+                kwargs["pageToken"] = token
+            data = api.posts().list(**kwargs).execute()
+            for post in data.get("items", []):
+                content = post.get("content", "") or ""
+                for m in pattern.finditer(content):
+                    if m.group(1) == "1":
+                        c1 += 1
+                    elif m.group(1) == "2":
+                        c2 += 1
+            token = data.get("nextPageToken")
+            if not token:
+                break
+    except Exception as e:
+        print("Erro ao contar variantes de imagem:", e)
+    return c1, c2
+
+def pick_distro_image_url(api, base_name):
+    if not base_name:
+        return "", ""
+    c1, c2 = count_image_variants_in_blogger(api, base_name)
+    if c1 <= c2:
+        variant = 1
+        file_name = f"{base_name}.png"
+    else:
+        variant = 2
+        file_name = f"{base_name} 2.png"
+
+    rel_path = f"{DISTROS_IMAGE_DIR}/{file_name}"
+    url = resolve_repo_image_url(rel_path)
+    marker = f"Distro: {base_name} | Variante: {variant} | Arquivo: {file_name}"
+    return url, marker
 
 def count_bot_posts(api):
-    """Conta quantos posts o robô já publicou para saber qual imagem usar."""
     count = 0
     token = None
     try:
@@ -429,7 +525,6 @@ def count_bot_posts(api):
             data = api.posts().list(**kwargs).execute()
             for post in data.get("items", []):
                 content = post.get("content", "") or ""
-                # Conta apenas posts que têm o marcador do robô
                 if "SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:" in content:
                     count += 1
             token = data.get("nextPageToken")
@@ -440,14 +535,11 @@ def count_bot_posts(api):
     print(f"Posts do robô já publicados: {count}")
     return count
 
-
 def pick_next_image_url(posts_count):
-    """Escolhe a próxima imagem da sequência cíclica (1 a 12)."""
     if not IMAGE_FILES:
         return "", ""
     total = len(IMAGE_FILES)
     start_idx = posts_count % total
-
     for offset in range(total):
         idx = (start_idx + offset) % total
         rel = IMAGE_FILES[idx]
@@ -456,6 +548,62 @@ def pick_next_image_url(posts_count):
             return url, rel
     return "", ""
 
+# ============================================================
+# DUPLICIDADE POR CONTEÚDO
+# ============================================================
+
+def _strip_html(text):
+    return re.sub(
+        r"\s+",
+        " ",
+        BeautifulSoup(str(text or ""), "html.parser").get_text(" ", strip=True),
+    ).strip()
+
+def _content_tokens(text):
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = text.lower()
+    words = re.findall(r"[a-z0-9]{3,}", text)
+    return [w for w in words if w not in _STOPWORDS_PT]
+
+def _content_signature(text, title=""):
+    combined = f"{title} {(text or '')[:CONTENT_SIGNATURE_CHARS]}"
+    return _content_tokens(combined)
+
+def is_content_duplicate(new_article, existing_contents, threshold=None):
+    """
+    Verifica se o novo artigo é duplicata de conteúdo de algum artigo existente.
+    new_article: dict com 'title' e 'text'
+    existing_contents: lista de (title, clean_text)
+    Retorna (is_dup: bool, best_ratio: float, matched_title: str)
+    """
+    if threshold is None:
+        threshold = CONTENT_DUPLICATE_THRESHOLD
+
+    new_sig = _content_signature(
+        new_article.get("text", ""),
+        new_article.get("title", ""),
+    )
+    if len(new_sig) < 20:
+        return False, 0.0, ""
+
+    new_joined = " ".join(new_sig)
+    best_ratio = 0.0
+    best_title = ""
+
+    for old_title, old_text in existing_contents:
+        old_sig = _content_tokens(old_text)
+        if len(old_sig) < 20:
+            continue
+        old_joined = " ".join(old_sig)
+        ratio = SequenceMatcher(None, new_joined, old_joined).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_title = old_title
+            if ratio >= threshold:
+                break
+
+    return best_ratio >= threshold, best_ratio, best_title
 
 # ============================================================
 # ARTIGO
@@ -512,7 +660,6 @@ def get_article(url):
 
     vv = videos(x)
 
-    # ÚNICA imagem inline permitida: a og:image da origem, sempre em after_paragraph=2
     inline_imgs = []
     if img:
         inline_imgs = [{"url": img, "after_paragraph": 2, "is_main": True}]
@@ -535,7 +682,6 @@ def get_article(url):
         "videos": vv,
         "inline_images": inline_imgs,
     }
-
 
 def links(source):
     out = []
@@ -600,7 +746,6 @@ def links(source):
     print(f"Links encontrados em {source['nome']}: {len(out)}")
     return out[:MAX_LINKS_PER_SOURCE]
 
-
 def blogger():
     credentials = Credentials(
         None,
@@ -612,10 +757,12 @@ def blogger():
     )
     return build("blogger", "v3", credentials=credentials, cache_discovery=False)
 
-
 def existing(api, show_log=True):
     blog_urls = set()
     source_urls = set()
+    existing_contents = []
+    existing_posts = []  # [(post_id, title, clean_text, status)]
+
     token = None
     try:
         while True:
@@ -623,6 +770,7 @@ def existing(api, show_log=True):
                 "blogId": BLOGGER_BLOG_ID,
                 "maxResults": 500,
                 "fetchBodies": True,
+                "status": "live",  # apenas publicados
             }
             if token:
                 kwargs["pageToken"] = token
@@ -632,6 +780,9 @@ def existing(api, show_log=True):
                 if post_url:
                     blog_urls.add(post_url)
                 content = post.get("content", "") or ""
+                title = post.get("title", "") or ""
+                post_id = post.get("id", "")
+                status = post.get("status", "")
                 for match in re.findall(
                     r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I
                 ):
@@ -641,16 +792,72 @@ def existing(api, show_log=True):
                     content, flags=re.I,
                 ):
                     source_urls.add(normalize_url(match))
+
+                clean = _strip_html(content)
+                if clean and len(clean) > 200:
+                    existing_contents.append((title, clean))
+                    existing_posts.append((post_id, title, clean, status))
             token = data.get("nextPageToken")
             if not token:
                 break
     except Exception as e:
         print("Erro ao consultar Blogger:", e)
+
     if show_log:
         print("Posts existentes no Blogger:", len(blog_urls))
         print("Fontes já registradas:", len(source_urls))
-    return blog_urls, source_urls
+        print("Conteúdos indexados para comparação:", len(existing_contents))
 
+    return blog_urls, source_urls, existing_contents, existing_posts
+
+# ============================================================
+# LIMPEZA DE DUPLICATAS EXISTENTES
+# ============================================================
+
+def clean_duplicates(api, existing_posts):
+    """
+    Detecta posts duplicados já publicados e reverte os mais antigos para rascunho.
+    Mantém o mais recente de cada par duplicado.
+    """
+    if not existing_posts:
+        print("Nenhum post para limpar.")
+        return
+
+    # Ordena por data? A API não retorna data no list padrão;
+    # usamos a ordem retornada (mais recente primeiro pelo Blogger).
+    reversed_posts = list(reversed(existing_posts))  # mais antigo primeiro
+
+    cleaned = 0
+    seen_sigs = []  # [(title, joined_tokens, post_id)]
+    for post_id, title, clean, status in reversed_posts:
+        tokens = _content_tokens(clean)
+        if len(tokens) < 20:
+            seen_sigs.append((title, " ".join(tokens), post_id, clean))
+            continue
+        joined = " ".join(tokens)
+        duplicate_of = None
+        best_ratio = 0.0
+        for old_title, old_joined, old_id, _ in seen_sigs:
+            if not old_joined:
+                continue
+            ratio = SequenceMatcher(None, joined, old_joined).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                duplicate_of = old_id
+        if duplicate_of and best_ratio >= CONTENT_DUPLICATE_THRESHOLD:
+            try:
+                api.posts().revert(
+                    blogId=BLOGGER_BLOG_ID,
+                    postId=post_id,
+                ).execute()
+                print(f"⚠ Duplicata revertida para rascunho: {title[:60]} (ratio {best_ratio:.2f})")
+                cleaned += 1
+            except Exception as e:
+                print(f"Erro ao reverter {post_id}: {e}")
+        else:
+            seen_sigs.append((title, joined, post_id, clean))
+
+    print(f"Duplicatas revertidas: {cleaned}")
 
 # ============================================================
 # IA
@@ -662,7 +869,6 @@ def is_transient_gemini_error(exc):
         "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
         "500", "502", "504", "TIMEOUT",
     ))
-
 
 def gemini_request(client, model, prompt):
     last_error = None
@@ -685,16 +891,13 @@ def gemini_request(client, model, prompt):
             time.sleep(delay)
     raise last_error
 
-
 def norm_words(text):
     text = unicodedata.normalize("NFKD", text or "")
     text = "".join(c for c in text if not unicodedata.combining(c)).lower()
     return re.findall(r"[a-z0-9]+", text)
 
-
 def ngrams(words, n=8):
     return {" ".join(words[i:i+n]) for i in range(max(0, len(words)-n+1))}
-
 
 def longest_common_phrase(src_words, out_words, min_words=15):
     if not src_words or not out_words:
@@ -713,7 +916,6 @@ def longest_common_phrase(src_words, out_words, min_words=15):
                 return best
     return best
 
-
 def originality_check(source_text, generated_text):
     src = norm_words(source_text)
     out = norm_words(generated_text)
@@ -729,7 +931,6 @@ def originality_check(source_text, generated_text):
         return False, f"sobreposição 8-gram alta ({overlap:.3f})"
     return True, "OK"
 
-
 def _ai_extract_text(provider, response):
     choices = response.get("choices") or []
     if not choices:
@@ -744,14 +945,12 @@ def _ai_extract_text(provider, response):
         )
     return str(content).strip()
 
-
 def _provider_is_quota_error(status_code, body):
     text = str(body or "").upper()
     return status_code == 429 or any(x in text for x in (
         "RESOURCE_EXHAUSTED", "RATE LIMIT", "RATE_LIMIT", "QUOTA",
         "TOO MANY REQUESTS", "DAILY LIMIT", "LIMIT EXCEEDED",
     ))
-
 
 def _call_http_provider(provider, api_key, model, prompt):
     endpoint = {
@@ -785,7 +984,6 @@ def _call_http_provider(provider, api_key, model, prompt):
     except Exception as exc:
         raise RuntimeError(f"Resposta JSON inválida do {provider}: {exc}")
 
-
 def _build_ai_providers():
     providers = []
     if GEMINI_API_KEY:
@@ -798,18 +996,15 @@ def _build_ai_providers():
         providers.append(("mistral", MISTRAL_API_KEY, MISTRAL_MODEL))
     return providers
 
-
 def _provider_request(provider, api_key, model, prompt):
     if provider.startswith("gemini"):
         return gemini_request(genai.Client(api_key=api_key), model, prompt)
     return _call_http_provider(provider, api_key, model, prompt)
 
-
 def _provider_text(provider, response):
     if provider.startswith("gemini"):
         return (getattr(response, "text", None) or "").strip()
     return _ai_extract_text(provider, response)
-
 
 def _is_quota_exception(exc):
     msg = str(exc).upper()
@@ -817,7 +1012,6 @@ def _is_quota_exception(exc):
         "429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE LIMIT", "RATE_LIMIT",
         "TOO MANY REQUESTS", "DAILY LIMIT", "LIMIT EXCEEDED",
     ))
-
 
 def gemini(article, client=None):
     global gemini_calls, gemini_quota_hit, _ai_config_logged
@@ -844,7 +1038,7 @@ Você é um jornalista especializado em tecnologia, Linux e Open Source.
 Sua tarefa é escrever uma matéria NOVA e ORIGINAL, em português do Brasil.
 
 REGRAS CRÍTICAS:
-1. TRADUZA e escreva OBRIGATORIAMENTE em português do Brasil. Traduza nomes técnicos quando houver tradução consagrada (ex: "kernel" -> "núcleo", mas "kernel" também é aceito).
+1. TRADUZA e escreva OBRIGATORIAMENTE em português do Brasil.
 2. Use SOMENTE os fatos presentes no texto-fonte.
 3. Não invente nomes, datas, números, locais, declarações ou acontecimentos.
 4. Não acrescente informações externas.
@@ -861,11 +1055,10 @@ OUTRAS REGRAS:
 - título novo e jornalístico;
 - resumo de 2 a 3 frases;
 - não copiar frases ou parágrafos da fonte;
-- não traduzir nem reproduzir a estrutura da matéria original;
 - retornar SOMENTE JSON válido, sem Markdown;
-- no campo "assunto_principal", informe o NOME DA PESSOA, EMPRESA OU PROJETO mais importante citado na matéria (ex.: "Linus Torvalds", "Canonical", "KDE Plasma").
-- no campo "palavras_chave", informe uma lista com 5 a 10 palavras-chave de SEO relacionadas ao conteúdo.
-- no campo "categoria_seo", informe a categoria principal do assunto: "Linux", "Open Source", "Distribuições", "Hardware", "Segurança", "Programação", "Notícia Tech".
+- em "assunto_principal", informe o NOME DA PESSOA, EMPRESA OU PROJETO mais importante.
+- em "palavras_chave", lista com 5 a 10 palavras-chave de SEO.
+- em "categoria_seo": "Linux", "Open Source", "Distribuições", "Hardware", "Segurança", "Programação", "Notícia Tech".
 
 FORMATO:
 {{"publicar":true,"titulo":"...","resumo":"...","materia":"...","assunto_principal":"...","palavras_chave":["..."],"categoria_seo":"..."}}
@@ -886,8 +1079,7 @@ TEXTO-FONTE:
         pass_prompt = prompt if pass_index == 0 else prompt + """
 
 ATENÇÃO: a versão anterior foi rejeitada por originalidade. Faça uma nova
-redação, reorganizando completamente a ordem das informações e variando as
-construções das frases. Não repita sequências da fonte.
+redação, reorganizando completamente a ordem das informações.
 """
         for provider, api_key, model in providers:
             if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
@@ -960,14 +1152,9 @@ construções das frases. Não repita sequências da fonte.
         print("⚠ IA: nenhum provedor disponível conseguiu gerar a matéria")
     return None
 
-
 # ============================================================
 # SEO AUTOMÁTICO
 # ============================================================
-
-def _strip_html(text):
-    return re.sub(r"\s+", " ", BeautifulSoup(str(text or ""), "html.parser").get_text(" ", strip=True)).strip()
-
 
 def _truncate(text, limit):
     text = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -978,7 +1165,6 @@ def _truncate(text, limit):
     if last_space > limit * 0.6:
         cut = cut[:last_space]
     return cut.rstrip(" ,;:-") + "..."
-
 
 def build_seo_payload(article, generated, final_image="", image_origin=""):
     titulo_base = str(generated.get("titulo", "")).strip()
@@ -1043,28 +1229,18 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
     schema = {
         "@context": "https://schema.org",
         "@type": "NewsArticle",
-        "mainEntityOfPage": {
-            "@type": "WebPage",
-            "@id": canonical,
-        },
+        "mainEntityOfPage": {"@type": "WebPage", "@id": canonical},
         "headline": titulo_base[:110],
         "description": description,
         "image": [image_url] if image_url else [],
         "datePublished": published,
         "dateModified": date_modified,
-        "author": {
-            "@type": "Organization",
-            "name": BLOG_NAME,
-            "url": BLOG_HOME_URL,
-        },
+        "author": {"@type": "Organization", "name": BLOG_NAME, "url": BLOG_HOME_URL},
         "publisher": {
             "@type": "Organization",
             "name": BLOG_NAME,
             "url": BLOG_HOME_URL,
-            "logo": {
-                "@type": "ImageObject",
-                "url": image_url or f"{BLOG_HOME_URL}/favicon.ico",
-            },
+            "logo": {"@type": "ImageObject", "url": image_url or f"{BLOG_HOME_URL}/favicon.ico"},
         },
         "articleSection": categoria_seo or "Tecnologia",
         "keywords": keywords,
@@ -1096,15 +1272,9 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
         description.replace("&", "&amp;").replace("<", "&lt;")
         .replace(">", "&gt;").replace('"', "&quot;")
     )
-    safe_keywords = (
-        keywords.replace("&", "&amp;").replace('"', "&quot;")
-    )
-    safe_canonical = (
-        canonical.replace("&", "&amp;").replace('"', "&quot;")
-    )
-    safe_image = (
-        (image_url or "").replace("&", "&amp;").replace('"', "&quot;")
-    )
+    safe_keywords = keywords.replace("&", "&amp;").replace('"', "&quot;")
+    safe_canonical = canonical.replace("&", "&amp;").replace('"', "&quot;")
+    safe_image = (image_url or "").replace("&", "&amp;").replace('"', "&quot;")
     twitter_site = f'<meta name="twitter:site" content="{BLOG_TWITTER}">' if BLOG_TWITTER else ""
 
     json_ld_article = json.dumps(schema, ensure_ascii=False)
@@ -1117,12 +1287,7 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 <meta name="author" content="{BLOG_NAME}">
 <meta name="language" content="Portuguese">
-<meta name="revisit-after" content="1 days">
-<meta name="rating" content="general">
-<meta name="distribution" content="global">
 <link rel="canonical" href="{safe_canonical}">
-
-<!-- Open Graph -->
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="{BLOG_NAME}">
 <meta property="og:title" content="{safe_title}">
@@ -1130,24 +1295,15 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
 <meta property="og:url" content="{safe_canonical}">
 <meta property="og:locale" content="{BLOG_LOCALE}">
 {f'<meta property="og:image" content="{safe_image}">' if safe_image else ''}
-{f'<meta property="og:image:width" content="1200">' if safe_image else ''}
-{f'<meta property="og:image:height" content="630">' if safe_image else ''}
 <meta property="article:published_time" content="{published}">
 <meta property="article:modified_time" content="{date_modified}">
 <meta property="article:section" content="{schema['articleSection']}">
-{f'<meta property="article:tag" content="{assunto}">' if assunto else ''}
-
-<!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{safe_title}">
 <meta name="twitter:description" content="{safe_desc}">
 {f'<meta name="twitter:image" content="{safe_image}">' if safe_image else ''}
 {twitter_site}
-
-<!-- Schema.org NewsArticle -->
 <script type="application/ld+json">{json_ld_article}</script>
-
-<!-- Schema.org BreadcrumbList -->
 <script type="application/ld+json">{json_ld_breadcrumb}</script>
 <!-- ===== FIM SEO ===== -->"""
 
@@ -1166,42 +1322,30 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
         "categoria_seo": categoria_seo,
     }
 
-
 def build_seo_head_for_blogger(seo):
     return seo.get("html_head", "")
-
 
 # ============================================================
 # HTML DO POST
 # ============================================================
 
 def _render_inline_image_html(img_url, alt_text):
-    """Renderiza uma imagem inline CENTRALIZADA no corpo do post."""
-    safe_img = (
-        (img_url or "")
-        .replace("&", "&amp;")
-        .replace('"', "&quot;")
-    )
+    safe_img = (img_url or "").replace("&", "&amp;").replace('"', "&quot;")
     safe_alt = (
         (alt_text or "")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        .replace("&", "&amp;").replace("<", "&lt;")
+        .replace(">", "&gt;").replace('"', "&quot;")
     )
     if not safe_img:
         return ""
     return (
         '<p style="text-align:center;margin:24px 0;">'
-        f'<img src="{safe_img}" '
-        f'alt="{safe_alt}" '
-        f'title="{safe_alt}" '
+        f'<img src="{safe_img}" alt="{safe_alt}" title="{safe_alt}" '
         'style="max-width:100%;height:auto;border-radius:12px;'
         'box-shadow:0 4px 12px rgba(0,0,0,0.10);'
         'display:block;margin-left:auto;margin-right:auto;">'
         '</p>'
     )
-
 
 def html(article, generated, final_image="", image_origin="", seo=None):
     seo = seo or {}
@@ -1211,31 +1355,20 @@ def html(article, generated, final_image="", image_origin="", seo=None):
         .replace("&", "&amp;").replace("<", "&lt;")
         .replace(">", "&gt;").replace('"', "&quot;")
     )
-
     image_url = final_image or article["image"]
     safe_image = image_url.replace("&", "&amp;").replace('"', "&quot;")
-
-    safe_source_url = (
-        article["url"]
-        .replace("&", "&amp;").replace('"', "&quot;")
-    )
-
+    safe_source_url = article["url"].replace("&", "&amp;").replace('"', "&quot;")
     seo_head = build_seo_head_for_blogger(seo)
 
     content = []
-
     if seo_head:
         content.append(seo_head)
 
     content.extend([
         f'<p><strong>{generated["resumo"]}</strong></p>',
         (
-            f'<p><img src="{safe_image}" '
-            f'alt="{safe_title}" '
-            f'title="{safe_title}" '
-            f'width="1200" height="630" '
-            f'style="max-width:100%;height:auto;border-radius:12px;">'
-            f'</p>'
+            f'<p><img src="{safe_image}" alt="{safe_title}" title="{safe_title}" '
+            'width="1200" height="630" style="max-width:100%;height:auto;border-radius:12px;"></p>'
         ),
     ])
 
@@ -1245,9 +1378,7 @@ def html(article, generated, final_image="", image_origin="", seo=None):
         if paragraph:
             article_paragraphs.append(paragraph)
 
-    # --- corpo da matéria com a ÚNICA imagem inline intercalada (após o 2º parágrafo) ---
-    inline_images = list(article.get("inline_images") or [])
-    inline_images = inline_images[:1] # Garantia: apenas uma imagem
+    inline_images = list(article.get("inline_images") or [])[:1]
     inline_images.sort(key=lambda item: item.get("after_paragraph", 9999))
 
     body_parts = []
@@ -1264,11 +1395,9 @@ def html(article, generated, final_image="", image_origin="", seo=None):
             target = 0
         if target > total_paras:
             target = total_paras
-
         while para_idx < target:
             body_parts.append(f"<p>{article_paragraphs[para_idx]}</p>")
             para_idx += 1
-
         rendered = _render_inline_image_html(img_info.get("url", ""), titulo_exibicao)
         if rendered:
             body_parts.append(rendered)
@@ -1283,20 +1412,11 @@ def html(article, generated, final_image="", image_origin="", seo=None):
         content.append(
             '<div style="margin:24px 0;padding:0;">'
             '<div style="position:relative;width:100%;padding-bottom:56.25%;'
-            'height:0;overflow:hidden;border-radius:12px;'
-            'box-shadow:0 4px 12px rgba(0,0,0,0.15);">'
+            'height:0;overflow:hidden;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);">'
             f'<iframe src="{video_url}" '
-            'style="position:absolute;top:0;left:0;width:100%;height:100%;'
-            'border:0;" '
-            'frameborder="0" '
-            'allow="accelerometer; autoplay; clipboard-write; encrypted-media; '
-            'gyroscope; picture-in-picture; web-share" '
-            'allowfullscreen '
-            'loading="lazy" '
-            'title="Vídeo da matéria">'
-            '</iframe>'
-            '</div>'
-            '</div>'
+            'style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" '
+            'frameborder="0" allowfullscreen loading="lazy" title="Vídeo da matéria"></iframe>'
+            '</div></div>'
         )
 
     source_marker = f"<!-- SUPORTE_DISTROS_LINUX_BR_SOURCE_URL: {safe_source_url} -->"
@@ -1313,20 +1433,25 @@ def html(article, generated, final_image="", image_origin="", seo=None):
 
     return "\n".join(content) + "\n" + source_marker + image_marker + seo_marker
 
-
 def main():
-    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | Tradução PT-BR | Sequência de imagens")
+    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | Tradução PT-BR | Imagem por distro | Duplicidade por conteúdo")
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
-    old_blog_urls, old_source_urls = existing(api)
-    
-    # Conta quantos posts o robô já fez para saber qual imagem usar
+    old_blog_urls, old_source_urls, existing_contents, existing_posts = existing(api)
+
+    if CLEAN_DUPLICATES:
+        print("CLEAN_DUPLICATES=true → limpando duplicatas já publicadas...")
+        clean_duplicates(api, existing_posts)
+        # Recarrega os conteúdos após limpeza
+        old_blog_urls, old_source_urls, existing_contents, existing_posts = existing(api, show_log=False)
+
     posts_count = count_bot_posts(api)
 
     candidates = []
     candidate_urls = set()
     source_counts = {}
     prefiltered_out = 0
+    duplicates_blocked = 0
 
     for source in SOURCES:
         source_links = links(source)
@@ -1361,6 +1486,14 @@ def main():
             ignored += 1
             continue
 
+        # ===== NOVO: Verificação de duplicidade por conteúdo ANTES de gerar =====
+        is_dup, dup_ratio, dup_title = is_content_duplicate(article, existing_contents)
+        if is_dup:
+            print(f"⚠ Duplicata: conteúdo similar a «{dup_title[:60]}» (ratio {dup_ratio:.2f}) — pulando")
+            duplicates_blocked += 1
+            ignored += 1
+            continue
+
         if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
             print("⚠ Gemini: limite desta execução atingido; restante ficará para a próxima execução")
             break
@@ -1372,14 +1505,31 @@ def main():
                 break
             continue
 
-        # ===== NOVA LÓGICA DE IMAGEM (Sequência do Repositório) =====
-        final_image, chosen_file = pick_next_image_url(posts_count + published)
-        if not final_image:
-            print("⚠ Imagem: nenhuma imagem acessível na pasta bot/imagens/.")
-            final_image = "https://raw.githubusercontent.com/Cassinaojk/suportedistroslinuxbr/main/bot/imagens/Distribui%C3%A7%C3%B5es%20Linux%20(1).png"
-            chosen_file = "Distribuições Linux (1).png (fallback)"
+        # ===== IMAGEM: distro no título → pasta bot/imagens/distros; senão fallback =====
+        titulo_para_deteccao = article.get("title", "") or generated.get("titulo", "")
+        distro_base = detect_distro_from_title(titulo_para_deteccao)
 
-        image_origin = f"Sequência do repositório: {chosen_file}"
+        final_image = ""
+        image_origin = ""
+
+        if distro_base:
+            final_image, distro_marker = pick_distro_image_url(api, distro_base)
+            if final_image:
+                image_origin = distro_marker
+                print(f"✓ Imagem: título de distro detectado ({distro_base}) → {final_image}")
+            else:
+                print(f"⚠ Imagem: falha ao resolver imagem da distro '{distro_base}', usando fallback.")
+
+        if not final_image:
+            final_image, chosen_file = pick_next_image_url(posts_count + published)
+            if final_image:
+                image_origin = f"Sequência do repositório: {chosen_file}"
+                print(f"✓ Imagem: fallback sequência (1-12) → {chosen_file}")
+            else:
+                final_image = "https://raw.githubusercontent.com/Cassinaojk/suportedistroslinuxbr/main/bot/imagens/Distribui%C3%A7%C3%B5es%20Linux%20(1).png"
+                image_origin = "Fallback final: Distribuições Linux (1).png"
+                print("⚠ Imagem: nenhuma imagem acessível; usando fallback final.")
+
         print(f"✓ Imagem final: {image_origin}")
         print(f"✓ URL da imagem: {final_image}")
 
@@ -1401,7 +1551,6 @@ def main():
                                 image_origin=image_origin, seo=seo),
                 "labels": seo["labels"],
             }
-
             try:
                 post_body["customMetaData"] = seo["description"]
             except Exception:
@@ -1415,6 +1564,14 @@ def main():
 
             published += 1
             old_source_urls.add(normalized)
+
+            # Adiciona o novo post à lista de conteúdos existentes para evitar duplicar no mesmo run
+            existing_contents.append((
+                seo["title"],
+                _strip_html(html(article, generated, final_image=final_image,
+                                 image_origin=image_origin, seo=seo)),
+            ))
+
             if response.get("url"):
                 old_blog_urls.add(normalize_url(response["url"]))
                 try:
@@ -1443,9 +1600,9 @@ def main():
     print("RESULTADO")
     print(f"Publicações: {published}")
     print(f"Ignoradas: {ignored}")
+    print(f"Duplicatas de conteúdo: {duplicates_blocked}")
     print(f"Falhas: {failed}")
 
-
-print("VERSÃO 1.5 ATIVA: Tradução PT-BR | sequência de 12 imagens do repositório | apenas 1 imagem extra da origem (após o 2º parágrafo) | SEO automático | Blogger")
+print("VERSÃO 1.7 ATIVA: imagem por distro | fallback 12 imagens | duplicidade por conteúdo (SequenceMatcher) | CLEAN_DUPLICATES | PT-BR | SEO | Blogger")
 
 main()
