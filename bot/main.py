@@ -32,13 +32,13 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.2 (Anti-Duplicidade de Conteúdo)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.3 (Correção de Variáveis e API)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 BLOGGER_REFRESH_TOKEN = os.environ["BLOGGER_REFRESH_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # ===== Configurações Gerais =====
 BLOG_NAME = os.getenv("BLOG_NAME", "Suporte Distros Linux BR").strip() or "Suporte Distros Linux BR"
@@ -58,6 +58,16 @@ MAX_AGE_DAYS = 0
 MIN_SOURCE_CHARS = 500
 MIN_SOURCE_PARAGRAPHS = 3
 TIMEOUT = 25
+
+# ===== Modelos de IA (Restaurados) =====
+GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # Corrigido para modelo válido
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-1.5-pro")
+GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192").strip()
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest").strip()
+AI_PROVIDER_TIMEOUT = int(os.getenv("AI_PROVIDER_TIMEOUT", "90"))
 
 # ===== Sequência de imagens do repositório =====
 IMAGE_FILES = [f"bot/imagens/Distribuições Linux ({i}).png" for i in range(1, 13)]
@@ -95,7 +105,7 @@ _STOPWORDS_PT = {
     "sua","seus","suas","nosso","nossa","nossas","ele","ela","eles",
     "elas","nós","vós","eu","tu","você","vocês","ao","aos","à","às",
     "pelo","pela","pelos","pelas","num","numa","nuns","numas",
-    "guia", "pratico", "completo", "essenciais", "ferramentas"
+    "guia", "pratico", "completo", "essenciais", "ferramentas", "tutorial"
 }
 
 def _tech_norm(value):
@@ -125,7 +135,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.2)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.3)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -289,12 +299,13 @@ def pick_next_image_url(posts_count):
 def get_all_existing_data(api):
     """Busca TODOS os posts do blog para análise de duplicidade e contagem."""
     blog_urls, source_urls = set(), set()
-    existing_posts = [] # Armazena tuplas (titulo, texto_limpo)
+    existing_posts = []
     token = None
     
     try:
         while True:
-            kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True, "status": "live"}
+            # Garantindo que busca todos os posts, publicados e rascunhos, se houver
+            kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True}
             if token: kw["pageToken"] = token
             data = api.posts().list(**kw).execute()
             
@@ -771,6 +782,6 @@ def main():
     print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.2 ATIVA: Anti-Duplicidade por Texto | Filtro de Data (Hoje) | Imagem por distro | SEO")
+print("VERSÃO 3.3 ATIVA: Anti-Duplicidade por Texto | Filtro de Data (Hoje) | Imagem por distro | SEO")
 
 main()
