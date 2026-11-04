@@ -32,7 +32,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.3 (Correção de Variáveis e API)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.4 (Banners Sequenciais)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -59,8 +59,8 @@ MIN_SOURCE_CHARS = 500
 MIN_SOURCE_PARAGRAPHS = 3
 TIMEOUT = 25
 
-# ===== Modelos de IA (Restaurados) =====
-GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-1.5-flash") # Corrigido para modelo válido
+# ===== Modelos de IA =====
+GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-1.5-pro")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -80,6 +80,16 @@ DISTRO_BASE_NAMES = {
     "ubuntu": "ubuntu", "xubuntu": "xubuntu", "zorin os": "zorin os", "zorin": "zorin os",
 }
 DISTROS_IMAGE_DIR = "bot/imagens/distros"
+
+# ===== Configuração dos Banners =====
+BANNERS_CONFIG = [
+    {"file": "estacio.png", "link": "https://estacio.br/selecao?cod_agente=14369444&u=723918&end=1", "alt": "Estácio - Cursos"},
+    {"file": "radio luz gospel.png", "link": "https://radioluzgospel.blogspot.com/", "alt": "Rádio Luz Gospel"},
+    {"file": "fasul cursos.png", "link": "https://afiliadoeducacionalfasul.com.br/100322024/cursos-livres", "alt": "Fasul - Cursos Livres"},
+    {"file": "graduação fasul.png", "link": "https://afiliadoeducacionalfasul.com.br/100322024/graduacao/cursos-graduacao-ead", "alt": "Fasul - Graduação EAD"},
+    {"file": "radio rockback fm.png", "link": "https://radiorockbackfm.blogspot.com/", "alt": "Rádio Rockback FM"}
+]
+BANNERS_DIR = "bot/banners"
 
 LINUX_TERMS = (
     "linux", "ubuntu", "fedora", "debian", "arch", "manjaro", "mint",
@@ -135,7 +145,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.3)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.4)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -232,7 +242,7 @@ def videos(x):
         if u not in out: out.append(u)
     return out[:3]
 
-# ============== IMAGENS ==============
+# ============== IMAGENS E BANNERS ==============
 
 def resolve_repo_image_url(relative_path):
     if not relative_path: return ""
@@ -294,6 +304,44 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
+def get_last_banner_index(api):
+    """Busca o último banner publicado para manter a sequência."""
+    token = None
+    last_banner = ""
+    try:
+        # Pega os 10 posts mais recentes para procurar o marcador
+        response = api.posts().list(
+            blogId=BLOGGER_BLOG_ID,
+            maxResults=10,
+            fetchBodies=True,
+            orderBy="published"
+        ).execute()
+        
+        for post in response.get("items", []):
+            content = post.get("content", "") or ""
+            m = re.search(r"SUPORTE_DISTROS_LINUX_BR_BANNER:\s*(.+)", content)
+            if m:
+                last_banner = m.group(1).strip()
+                break # Achou o mais recente, para o loop
+    except Exception as e:
+        print("Aviso: Não foi possível ler o último banner:", e)
+        
+    if not last_banner:
+        return 0 # Se não achou nenhum, começa do zero (Estácio)
+        
+    # Descobre o índice do último banner na lista
+    for idx, b in enumerate(BANNERS_CONFIG):
+        if b["file"] == last_banner:
+            return (idx + 1) % len(BANNERS_CONFIG) # Retorna o próximo índice
+            
+    return 0
+
+def pick_next_banner(api):
+    idx = get_last_banner_index(api)
+    banner = BANNERS_CONFIG[idx]
+    url = resolve_repo_image_url(f"{BANNERS_DIR}/{banner['file']}")
+    return banner, url
+
 # ============== BUSCA NO BLOGGER E ANTI-DUPLICIDADE ==============
 
 def get_all_existing_data(api):
@@ -304,7 +352,6 @@ def get_all_existing_data(api):
     
     try:
         while True:
-            # Garantindo que busca todos os posts, publicados e rascunhos, se houver
             kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True}
             if token: kw["pageToken"] = token
             data = api.posts().list(**kw).execute()
@@ -321,7 +368,6 @@ def get_all_existing_data(api):
                 for m in re.findall(r'SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I):
                     source_urls.add(normalize_url(m))
                 
-                # Extrai texto limpo
                 clean = re.sub(r"\s+", " ", BeautifulSoup(content, "html.parser").get_text(" ", strip=True)).strip()
                 if clean and len(clean) > 100:
                     existing_posts.append({"title": title, "text": clean})
@@ -335,16 +381,11 @@ def get_all_existing_data(api):
     return blog_urls, source_urls, existing_posts
 
 def extract_meaningful_words(text):
-    """Extrai palavras únicas e relevantes do texto."""
     norm = _tech_norm(text)
     words = set(re.findall(r"\b[a-z]{4,}\b", norm))
     return words - _STOPWORDS_PT
 
 def check_content_duplicate(article, existing_posts):
-    """
-    Verifica se o assunto do novo artigo já existe no blog.
-    Compara tanto o título original quanto o texto da fonte com os posts antigos.
-    """
     new_title_words = extract_meaningful_words(article["title"])
     new_text_words = extract_meaningful_words(article["text"])
     
@@ -352,13 +393,10 @@ def check_content_duplicate(article, existing_posts):
         old_title_words = extract_meaningful_words(old["title"])
         old_text_words = extract_meaningful_words(old["text"])
         
-        # 1. Similaridade de Título (Se compartilham 2+ palavras fortes no título)
         title_overlap = new_title_words & old_title_words
         if len(title_overlap) >= 2:
             return True, f"Título similar: {old['title'][:50]}"
             
-        # 2. Similaridade de Conteúdo (Jaccard no texto)
-        # Se 40% das palavras da nova notícia já estão no post antigo
         if new_text_words and old_text_words:
             intersection = new_text_words & old_text_words
             union = new_text_words | old_text_words
@@ -641,7 +679,7 @@ def _render_inline_image_html(img_url, alt_text):
             'box-shadow:0 4px 12px rgba(0,0,0,0.10);display:block;'
             'margin-left:auto;margin-right:auto;"></p>')
 
-def html(article, generated, final_image="", image_origin="", seo=None):
+def html(article, generated, final_image="", image_origin="", seo=None, banner_info=None):
     seo = seo or {}
     tb = seo.get("titulo_base") or generated.get("titulo","")
     st = tb.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
@@ -670,10 +708,26 @@ def html(article, generated, final_image="", image_origin="", seo=None):
         content.append('<div style="margin:24px 0;"><div style="position:relative;width:100%;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;">'
                        f'<iframe src="{vu}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" frameborder="0" allowfullscreen loading="lazy"></iframe>'
                        '</div></div>')
+    
+    # Adiciona o Banner no final do post
+    banner_marker = ""
+    if banner_info:
+        b_cfg = banner_info.get("config")
+        b_url = banner_info.get("url")
+        if b_cfg and b_url:
+            b_link = b_cfg.get("link", "#")
+            b_alt = b_cfg.get("alt", "Banner")
+            content.append(f'<div style="text-align:center; margin-top: 30px; margin-bottom: 20px;">'
+                           f'<a href="{b_link}" target="_blank" rel="noopener noreferrer">'
+                           f'<img src="{b_url}" alt="{b_alt}" style="max-width:100%; height:auto; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">'
+                           f'</a></div>')
+            banner_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_BANNER: {b_cfg.get('file')} -->"
+
     src_marker = f"<!-- SUPORTE_DISTROS_LINUX_BR_SOURCE_URL: {ss} -->"
     img_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_IMAGE_SOURCE: {image_origin} -->" if image_origin else ""
     seo_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_SEO_DESCRIPTION: {seo.get('description','')[:300]} -->\n<!-- SUPORTE_DISTROS_LINUX_BR_SEO_KEYWORDS: {seo.get('keywords','')[:300]} -->" if seo else ""
-    return "\n".join(content) + "\n" + src_marker + img_marker + seo_marker
+    
+    return "\n".join(content) + "\n" + src_marker + img_marker + seo_marker + banner_marker
 
 # ============== MAIN ==============
 def main():
@@ -681,7 +735,6 @@ def main():
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
     
-    # 1. Pega TODOS os posts (títulos e textos limpos)
     old_blog_urls, old_source_urls, existing_posts = get_all_existing_data(api)
     posts_count = count_bot_posts(api)
 
@@ -709,7 +762,6 @@ def main():
         n = normalize_url(art["url"])
         if n in old_source_urls: ignored += 1; continue
 
-        # VERIFICAÇÃO 1 (Antes da IA): Compara a fonte original com o site
         is_dup_pre, dup_reason_pre = check_content_duplicate(art, existing_posts)
         if is_dup_pre:
             print(f"⚠ Duplicata de assunto (Pré-IA): «{art['title'][:60]}» — {dup_reason_pre}.")
@@ -720,14 +772,12 @@ def main():
         if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
             break
 
-        # Gera a matéria com a IA
         gen = gemini(art, gen_client)
         if not gen:
             ignored += 1
             if gemini_quota_hit: break
             continue
 
-        # VERIFICAÇÃO 2 (Após IA): Cria um pseudo-artigo com o texto gerado pela IA e compara novamente
         gen_art = {"title": gen.get("titulo", ""), "text": gen.get("materia", "")}
         is_dup_post, dup_reason_post = check_content_duplicate(gen_art, existing_posts)
         
@@ -737,7 +787,6 @@ def main():
             ignored += 1
             continue
 
-        # Se não for duplicata, prossegue com imagem, SEO e publicação
         distro = detect_distro_from_title(art.get("title","") or gen.get("titulo",""))
         final_image = ""; image_origin = ""
         if distro:
@@ -752,15 +801,19 @@ def main():
         seo = build_seo_payload(art, gen, final_image=final_image, image_origin=image_origin)
         print(f"✓ SEO: título = {seo['title'][:90]}")
 
+        # Seleciona o banner da vez
+        banner_cfg, banner_url = pick_next_banner(api)
+        banner_info = {"config": banner_cfg, "url": banner_url}
+        print(f"✓ Banner: {banner_cfg['file']}")
+
         try:
-            post_body = {"title": seo["title"].strip(), "content": html(art, gen, final_image=final_image, image_origin=image_origin, seo=seo), "labels": seo["labels"]}
+            post_body = {"title": seo["title"].strip(), "content": html(art, gen, final_image=final_image, image_origin=image_origin, seo=seo, banner_info=banner_info), "labels": seo["labels"]}
             try: post_body["customMetaData"] = seo["description"]
             except Exception: pass
             resp = api.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body, isDraft=False).execute()
             published += 1
             old_source_urls.add(n)
 
-            # Adiciona o novo post à lista de posts existentes para evitar duplicatas na mesma execução
             existing_posts.append({"title": seo["title"], "text": gen.get("materia", "")})
 
             if resp.get("url"):
@@ -768,7 +821,7 @@ def main():
                 try:
                     new_url = resp["url"]
                     if new_url != seo["canonical"]:
-                        upd = html(art, gen, final_image=final_image, image_origin=image_origin, seo={**seo, "canonical": new_url})
+                        upd = html(art, gen, final_image=final_image, image_origin=image_origin, seo={**seo, "canonical": new_url}, banner_info=banner_info)
                         api.posts().patch(blogId=BLOGGER_BLOG_ID, postId=resp["id"], body={"content": upd}).execute()
                 except Exception as e: print(f"⚠ SEO canonical: {e}")
             print(f"✓ Publicada: {seo['title'].strip()}")
@@ -782,6 +835,6 @@ def main():
     print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.3 ATIVA: Anti-Duplicidade por Texto | Filtro de Data (Hoje) | Imagem por distro | SEO")
+print("VERSÃO 3.4 ATIVA: Banners Sequenciais | Anti-Duplicidade por Texto | Filtro de Data (Hoje) | Imagem por distro | SEO")
 
 main()
