@@ -2,7 +2,7 @@ import os, re, json, requests, time, random, io, contextlib, unicodedata, warnin
 import builtins
 from datetime import datetime, date, timezone, timedelta
 
-_VERBOSE_LOG = os.getenv("VERBOSE_LOG", "false").lower() in ("1", "true", "yes", "sim")
+_VERBOSE_LOG = os.getenv("VERBOSE_LOG", "true").lower() in ("1", "true", "yes", "sim")
 _original_print = builtins.print
 
 def print(*args, **kwargs):
@@ -21,6 +21,12 @@ def print(*args, **kwargs):
         or message.startswith("⚠ Duplicata de assunto:")
         or message.startswith("⚠ Notícia antiga:")
         or message.startswith("Erro:")
+        or message.startswith("Fontes encontradas:")
+        or message.startswith("Puladas:")
+        or message.startswith("Novas matérias")
+        or message.startswith("MAX_AGE_DAYS")
+        or message.startswith("✓ SEO")
+        or message.startswith("✓ Imagem")
     )
     if important:
         return _original_print(*args, **kwargs)
@@ -32,7 +38,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.4 (Banners Sequenciais)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.5 (Sem Filtro de Conteúdo + Scraping HTML)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -49,14 +55,17 @@ SEO_TITLE_SUFFIX = os.getenv("SEO_TITLE_SUFFIX", f" | {BLOG_NAME}").strip()
 SEO_DESCRIPTION_MAX = int(os.getenv("SEO_DESCRIPTION_MAX", "160"))
 SEO_KEYWORDS_MAX = int(os.getenv("SEO_KEYWORDS_MAX", "12"))
 
-MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))
+MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "2"))
 MAX_GEMINI_TEXT_CALLS_PER_RUN = int(os.getenv("MAX_GEMINI_TEXT_CALLS_PER_RUN", "6"))
 GEMINI_MAX_RETRIES = 3
 GEMINI_RETRY_BASE_SECONDS = 4
-MAX_LINKS_PER_SOURCE = 80
-MAX_AGE_DAYS = 0 
-MIN_SOURCE_CHARS = 500
-MIN_SOURCE_PARAGRAPHS = 3
+MAX_LINKS_PER_SOURCE = 120
+
+# Filtro de data flexível (Hoje + 3 dias anteriores)
+MAX_AGE_DAYS = int(os.getenv("MAX_AGE_DAYS", "4"))
+
+MIN_SOURCE_CHARS = 250
+MIN_SOURCE_PARAGRAPHS = 1
 TIMEOUT = 25
 
 # ===== Modelos de IA =====
@@ -145,7 +154,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.4)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.5)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -305,35 +314,28 @@ def pick_next_image_url(posts_count):
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
 def get_last_banner_index(api):
-    """Busca o último banner publicado para manter a sequência."""
     token = None
     last_banner = ""
     try:
-        # Pega os 10 posts mais recentes para procurar o marcador
         response = api.posts().list(
             blogId=BLOGGER_BLOG_ID,
             maxResults=10,
             fetchBodies=True,
             orderBy="published"
         ).execute()
-        
         for post in response.get("items", []):
             content = post.get("content", "") or ""
             m = re.search(r"SUPORTE_DISTROS_LINUX_BR_BANNER:\s*(.+)", content)
             if m:
                 last_banner = m.group(1).strip()
-                break # Achou o mais recente, para o loop
+                break
     except Exception as e:
         print("Aviso: Não foi possível ler o último banner:", e)
-        
     if not last_banner:
-        return 0 # Se não achou nenhum, começa do zero (Estácio)
-        
-    # Descobre o índice do último banner na lista
+        return 0
     for idx, b in enumerate(BANNERS_CONFIG):
         if b["file"] == last_banner:
-            return (idx + 1) % len(BANNERS_CONFIG) # Retorna o próximo índice
-            
+            return (idx + 1) % len(BANNERS_CONFIG)
     return 0
 
 def pick_next_banner(api):
@@ -342,10 +344,9 @@ def pick_next_banner(api):
     url = resolve_repo_image_url(f"{BANNERS_DIR}/{banner['file']}")
     return banner, url
 
-# ============== BUSCA NO BLOGGER E ANTI-DUPLICIDADE ==============
+# ============== BUSCA NO BLOGGER ==============
 
 def get_all_existing_data(api):
-    """Busca TODOS os posts do blog para análise de duplicidade e contagem."""
     blog_urls, source_urls = set(), set()
     existing_posts = []
     token = None
@@ -380,33 +381,6 @@ def get_all_existing_data(api):
     print(f"Posts existentes verificados: {len(existing_posts)}")
     return blog_urls, source_urls, existing_posts
 
-def extract_meaningful_words(text):
-    norm = _tech_norm(text)
-    words = set(re.findall(r"\b[a-z]{4,}\b", norm))
-    return words - _STOPWORDS_PT
-
-def check_content_duplicate(article, existing_posts):
-    new_title_words = extract_meaningful_words(article["title"])
-    new_text_words = extract_meaningful_words(article["text"])
-    
-    for old in existing_posts:
-        old_title_words = extract_meaningful_words(old["title"])
-        old_text_words = extract_meaningful_words(old["text"])
-        
-        title_overlap = new_title_words & old_title_words
-        if len(title_overlap) >= 2:
-            return True, f"Título similar: {old['title'][:50]}"
-            
-        if new_text_words and old_text_words:
-            intersection = new_text_words & old_text_words
-            union = new_text_words | old_text_words
-            jaccard = len(intersection) / len(union)
-            
-            if jaccard > 0.40:
-                return True, f"Conteúdo similar ({jaccard*100:.0f}%): {old['title'][:50]}"
-                
-    return False, ""
-
 # ============== ARTIGO ==============
 
 def get_article(url):
@@ -435,9 +409,14 @@ def get_article(url):
         t = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
         if len(t) >= 35: paragraphs.append(t)
     text = "\n\n".join(paragraphs)
-    if len(text) < MIN_SOURCE_CHARS or len(paragraphs) < MIN_SOURCE_PARAGRAPHS: return None
+    
+    if len(text) < MIN_SOURCE_CHARS or len(paragraphs) < MIN_SOURCE_PARAGRAPHS: 
+        return None
+        
     link_count = len(box.find_all("a"))
-    if len(text) < 1000 and link_count > len(paragraphs) * 4: return None
+    if len(text) < 1000 and link_count > len(paragraphs) * 4: 
+        return None
+        
     vv = videos(x)
     inline_imgs = [{"url": img, "after_paragraph": 2, "is_main": True}] if img else []
     return {"url": normalize_url(url), "title": title, "date": d, "image": img, "text": text[:16000], "videos": vv, "inline_images": inline_imgs}
@@ -447,16 +426,19 @@ def links(source):
     source_host = urlparse(source["url"]).netloc.lower()
     section_only = source.get("section_only", False)
     path_prefix = source.get("path_prefix", "").lower()
+    
     def host_matches(u):
         h = urlparse(u).netloc.lower()
         if h == source_host: return True
         if h.endswith("." + source_host): return True
         hn = h.replace("www.","",1); sn = source_host.replace("www.","",1)
         return hn == sn or hn.endswith("." + sn)
+        
     def section_matches(u):
         if not section_only: return True
         if not path_prefix: return True
         return path_prefix in urlparse(u).path.lower()
+        
     for feed in source["feeds"]:
         x = soup(feed, True)
         if not x: continue
@@ -467,13 +449,21 @@ def links(source):
             if not u or bad_url(u): continue
             if not host_matches(u) or not section_matches(u): continue
             if u not in seen: seen.add(u); out.append(u)
+            
+    rss_count = len(out)
+    
     x = soup(source["url"])
     if x:
         for a in x.find_all("a", href=True):
             u = normalize_url(urljoin(source["url"], a["href"]))
             if bad_url(u): continue
             if not host_matches(u) or not section_matches(u): continue
-            if u not in seen: seen.add(u); out.append(u)
+            path = urlparse(u).path.strip("/")
+            if path.count("/") >= 1 and len(path) > 10:
+                if u not in seen: seen.add(u); out.append(u)
+                
+    html_count = len(out) - rss_count
+    print(f"Links em {source['nome']}: {len(out)} (RSS: {rss_count}, HTML: {html_count})")
     return out[:MAX_LINKS_PER_SOURCE]
 
 def blogger():
@@ -709,7 +699,6 @@ def html(article, generated, final_image="", image_origin="", seo=None, banner_i
                        f'<iframe src="{vu}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" frameborder="0" allowfullscreen loading="lazy"></iframe>'
                        '</div></div>')
     
-    # Adiciona o Banner no final do post
     banner_marker = ""
     if banner_info:
         b_cfg = banner_info.get("config")
@@ -731,7 +720,8 @@ def html(article, generated, final_image="", image_origin="", seo=None, banner_i
 
 # ============== MAIN ==============
 def main():
-    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS | PT-BR | Anti-Duplicidade de Texto")
+    print("Fontes: Linux.com + Phoronix + LinuxToday + Pplware Linux + Linuxize + It's FOSS")
+    print(f"MAX_AGE_DAYS configurado: {MAX_AGE_DAYS}")
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
     
@@ -753,7 +743,7 @@ def main():
     print(f"Fontes encontradas: {' | '.join(f'{k}: {v}' for k, v in source_counts.items())}")
     print(f"Puladas: {prefiltered}")
     candidates.sort(key=lambda a: a["date"] or datetime.min, reverse=True)
-    print(f"Novas matérias de tecnologia (de hoje): {len(candidates)}")
+    print(f"Novas matérias aceitas: {len(candidates)}")
 
     published = 0; failed = 0; ignored = 0; dups = 0
     
@@ -762,13 +752,6 @@ def main():
         n = normalize_url(art["url"])
         if n in old_source_urls: ignored += 1; continue
 
-        is_dup_pre, dup_reason_pre = check_content_duplicate(art, existing_posts)
-        if is_dup_pre:
-            print(f"⚠ Duplicata de assunto (Pré-IA): «{art['title'][:60]}» — {dup_reason_pre}.")
-            dups += 1
-            ignored += 1
-            continue
-
         if gemini_calls >= MAX_GEMINI_TEXT_CALLS_PER_RUN:
             break
 
@@ -776,15 +759,6 @@ def main():
         if not gen:
             ignored += 1
             if gemini_quota_hit: break
-            continue
-
-        gen_art = {"title": gen.get("titulo", ""), "text": gen.get("materia", "")}
-        is_dup_post, dup_reason_post = check_content_duplicate(gen_art, existing_posts)
-        
-        if is_dup_post:
-            print(f"⚠ Duplicata de assunto (Pós-IA): «{gen.get('titulo','')[:60]}» — {dup_reason_post}.")
-            dups += 1
-            ignored += 1
             continue
 
         distro = detect_distro_from_title(art.get("title","") or gen.get("titulo",""))
@@ -801,7 +775,6 @@ def main():
         seo = build_seo_payload(art, gen, final_image=final_image, image_origin=image_origin)
         print(f"✓ SEO: título = {seo['title'][:90]}")
 
-        # Seleciona o banner da vez
         banner_cfg, banner_url = pick_next_banner(api)
         banner_info = {"config": banner_cfg, "url": banner_url}
         print(f"✓ Banner: {banner_cfg['file']}")
@@ -813,8 +786,6 @@ def main():
             resp = api.posts().insert(blogId=BLOGGER_BLOG_ID, body=post_body, isDraft=False).execute()
             published += 1
             old_source_urls.add(n)
-
-            existing_posts.append({"title": seo["title"], "text": gen.get("materia", "")})
 
             if resp.get("url"):
                 old_blog_urls.add(normalize_url(resp["url"]))
@@ -832,9 +803,6 @@ def main():
     print("RESULTADO")
     print(f"Publicações: {published}")
     print(f"Ignoradas: {ignored}")
-    print(f"Duplicatas de assunto: {dups}")
     print(f"Falhas: {failed}")
-
-print("VERSÃO 3.4 ATIVA: Banners Sequenciais | Anti-Duplicidade por Texto | Filtro de Data (Hoje) | Imagem por distro | SEO")
 
 main()
