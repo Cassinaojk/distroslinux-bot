@@ -27,6 +27,7 @@ def print(*args, **kwargs):
         or message.startswith("MAX_AGE_DAYS")
         or message.startswith("✓ SEO")
         or message.startswith("✓ Imagem")
+        or message.startswith("Aviso:")
     )
     if important:
         return _original_print(*args, **kwargs)
@@ -38,7 +39,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.7 (Modelo IA 3.5 + Scraping HTML)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.8 (Banners Corrigidos + Modelo IA 3.5)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -61,14 +62,12 @@ GEMINI_MAX_RETRIES = 3
 GEMINI_RETRY_BASE_SECONDS = 4
 MAX_LINKS_PER_SOURCE = 120
 
-# Filtro de data flexível (Hoje + 3 dias anteriores)
 MAX_AGE_DAYS = int(os.getenv("MAX_AGE_DAYS", "4"))
-
 MIN_SOURCE_CHARS = 250
 MIN_SOURCE_PARAGRAPHS = 1
 TIMEOUT = 25
 
-# ===== Modelos de IA Atualizados para a versão ativa =====
+# Modelos de IA Atualizados
 GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
@@ -154,7 +153,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.7)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.8)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -317,11 +316,12 @@ def get_last_banner_index(api):
     token = None
     last_banner = ""
     try:
+        # CORREÇÃO: O valor precisa ser "PUBLISHED" em maiúsculo
         response = api.posts().list(
             blogId=BLOGGER_BLOG_ID,
             maxResults=10,
             fetchBodies=True,
-            orderBy="published"
+            orderBy="PUBLISHED"
         ).execute()
         for post in response.get("items", []):
             content = post.get("content", "") or ""
@@ -807,5 +807,5 @@ def main():
     print(f"Ignoradas: {ignored}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.7 ATIVA: Banners Sequenciais | Filtro Flexível | Modelo IA Gemini 3.5")
+print("VERSÃO 3.8 ATIVA: Banners Rotativos Corrigidos | Filtro Flexível | Modelo IA Gemini 3.5")
 main()
