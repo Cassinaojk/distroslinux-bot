@@ -38,7 +38,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.5 (Sem Filtro de Conteúdo + Scraping HTML)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.6 (Modelos de IA Atualizados)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -68,9 +68,9 @@ MIN_SOURCE_CHARS = 250
 MIN_SOURCE_PARAGRAPHS = 1
 TIMEOUT = 25
 
-# ===== Modelos de IA =====
-GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-1.5-pro")
+# ===== Modelos de IA Atualizados (2.5-flash e 2.5-pro) =====
+GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
@@ -154,7 +154,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.5)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.6)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -745,7 +745,7 @@ def main():
     candidates.sort(key=lambda a: a["date"] or datetime.min, reverse=True)
     print(f"Novas matérias aceitas: {len(candidates)}")
 
-    published = 0; failed = 0; ignored = 0; dups = 0
+    published = 0; failed = 0; ignored = 0
     
     while candidates and published < MAX_POSTS_PER_RUN:
         art = candidates.pop(0)
@@ -787,6 +787,8 @@ def main():
             published += 1
             old_source_urls.add(n)
 
+            existing_posts.append({"title": seo["title"], "text": gen.get("materia", "")})
+
             if resp.get("url"):
                 old_blog_urls.add(normalize_url(resp["url"]))
                 try:
@@ -805,4 +807,5 @@ def main():
     print(f"Ignoradas: {ignored}")
     print(f"Falhas: {failed}")
 
+print("VERSÃO 3.6 ATIVA: Banners Sequenciais | Filtro Flexível | Modelos IA 2.5")
 main()
