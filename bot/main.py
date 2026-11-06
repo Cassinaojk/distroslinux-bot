@@ -39,7 +39,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.8 (Banners Corrigidos + Modelo IA 3.5)")
+print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.9 (Banners Rotativos Corrigidos + IA 3.5)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -153,11 +153,14 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.8)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.9)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
 _ai_config_logged = False
+
+# Variável global para controlar o banner na mesma execução (evita repetição)
+_next_banner_idx = None
 
 def normalize_url(u):
     if not u: return ""
@@ -316,7 +319,6 @@ def get_last_banner_index(api):
     token = None
     last_banner = ""
     try:
-        # CORREÇÃO: O valor precisa ser "PUBLISHED" em maiúsculo
         response = api.posts().list(
             blogId=BLOGGER_BLOG_ID,
             maxResults=10,
@@ -339,7 +341,16 @@ def get_last_banner_index(api):
     return 0
 
 def pick_next_banner(api):
-    idx = get_last_banner_index(api)
+    global _next_banner_idx
+    # Se já temos um índice definido para esta execução, usa ele e incrementa
+    if _next_banner_idx is not None:
+        idx = _next_banner_idx
+        _next_banner_idx = (idx + 1) % len(BANNERS_CONFIG)
+    else:
+        # Se é a primeira vez, busca na API e guarda o próximo
+        idx = get_last_banner_index(api)
+        _next_banner_idx = (idx + 1) % len(BANNERS_CONFIG)
+        
     banner = BANNERS_CONFIG[idx]
     url = resolve_repo_image_url(f"{BANNERS_DIR}/{banner['file']}")
     return banner, url
@@ -807,5 +818,5 @@ def main():
     print(f"Ignoradas: {ignored}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.8 ATIVA: Banners Rotativos Corrigidos | Filtro Flexível | Modelo IA Gemini 3.5")
+print("VERSÃO 3.9 ATIVA: Banners Rotativos Corrigidos | Filtro Flexível | Modelo IA Gemini 3.5")
 main()
