@@ -1,4 +1,4 @@
-name: Suporte Distros Linux BR - Notícias
+name: Blog Distros Linux - Notícias
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
           # Configurações do Blog
-          BLOG_NAME: "Suporte Distros Linux BR"
-          BLOG_HOME_URL: "https://suportedistroslinuxbr.blogspot.com"
+          BLOG_NAME: "Blog Distros Linux"
+          BLOG_HOME_URL: "https://distroslinuxoficial.blogspot.com"
 
         run: python -u bot/main.py
