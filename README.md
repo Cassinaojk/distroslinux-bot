@@ -1,6 +1,8 @@
-# Suporte Distros Linux BR — Robô de Notícias 3.0
+# Blog Distros Linux — Robô de Notícias 3.0
 
 Robô GitHub Actions para coletar notícias de fontes de tecnologia/Linux, traduzir e gerar matérias originais em português do Brasil com IA e publicar no Blogger.
+
+**Blog:** [https://distroslinuxoficial.blogspot.com](https://distroslinuxoficial.blogspot.com)
 
 ## Principais mudanças da versão 3.0
 
@@ -37,7 +39,7 @@ Robô GitHub Actions para coletar notícias de fontes de tecnologia/Linux, tradu
   - **Se mencionar uma distro** (Ubuntu, Fedora, Arch, Debian, Linux Mint, Manjaro, Pop!_OS, Red Hat, openSUSE, Kubuntu, Xubuntu, Zorin OS, elementary OS, Deepin, CentOS): usa a imagem específica da distro em `bot/imagens/distros/`, alternando entre `<distro>.png` e `<distro> 2.png`.
   - **Se não mencionar distro**: usa a sequência de 12 imagens genéricas em `bot/imagens/` (`Distribuições Linux (1).png` a `Distribuições Linux (12).png`).
 - Vídeos incorporados (YouTube, Vimeo, etc.) são extraídos automaticamente da fonte.
-- A fonte fica registrada em comentário HTML invisível (`SUPORTE_DISTROS_LINUX_BR_SOURCE_URL`).
+- A fonte fica registrada em comentário HTML invisível (`BLOG_DISTROS_LINUX_SOURCE_URL`).
 - O robô traduz automaticamente o conteúdo para **português do Brasil** antes de publicar.
 - Apenas **1 imagem extra** é adicionada ao corpo do post (a `og:image` da fonte, após o 2º parágrafo).
 
@@ -80,5 +82,7 @@ A verificação bloqueia apenas sinais fortes de reprodução literal:
 - `MAX_GEMINI_TEXT_CALLS_PER_RUN` — padrão `6`
 - `GEMINI_MODEL` / `GEMINI_FALLBACK_MODEL`
 - `GROQ_MODEL` / `MISTRAL_MODEL`
+- `GITHUB_REPOSITORY` — owner/repo (default `Cassinaojk/distroslinuxoficial`)
+- `BLOG_HOME_URL` — URL do blog (default `https://distroslinuxoficial.blogspot.com`)
 
 ## Estrutura de arquivos
