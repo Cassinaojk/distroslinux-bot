@@ -10,7 +10,7 @@ def print(*args, **kwargs):
         return _original_print(*args, **kwargs)
     message = " ".join(str(a) for a in args).strip()
     important = (
-        message.startswith("SUPORTE DISTROS LINUX BR - ROBÔ")
+        message.startswith("BLOG DISTROS LINUX - ROBÔ")
         or message.startswith("VERSÃO ")
         or message.startswith("Posts existentes verificados:")
         or message.startswith("✓ Publicada:")
@@ -39,7 +39,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("SUPORTE DISTROS LINUX BR - ROBÔ DE NOTÍCIAS 3.9 (Banners Rotativos Corrigidos + IA 3.5)")
+print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.9 (Banners Rotativos Corrigidos + IA 3.5)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -48,8 +48,8 @@ BLOGGER_REFRESH_TOKEN = os.environ["BLOGGER_REFRESH_TOKEN"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # ===== Configurações Gerais =====
-BLOG_NAME = os.getenv("BLOG_NAME", "Suporte Distros Linux BR").strip() or "Suporte Distros Linux BR"
-BLOG_HOME_URL = os.getenv("BLOG_HOME_URL", "https://suportedistroslinuxbr.blogspot.com").strip().rstrip("/")
+BLOG_NAME = os.getenv("BLOG_NAME", "Blog Distros Linux").strip() or "Blog Distros Linux"
+BLOG_HOME_URL = os.getenv("BLOG_HOME_URL", "https://distroslinuxoficial.blogspot.com").strip().rstrip("/")
 BLOG_LOCALE = os.getenv("BLOG_LOCALE", "pt_BR").strip() or "pt_BR"
 BLOG_TWITTER = os.getenv("BLOG_TWITTER", "").strip()
 SEO_TITLE_SUFFIX = os.getenv("SEO_TITLE_SUFFIX", f" | {BLOG_NAME}").strip()
@@ -153,7 +153,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; SuporteDistrosLinuxBot/3.9)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.9)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -257,7 +257,7 @@ def videos(x):
 
 def resolve_repo_image_url(relative_path):
     if not relative_path: return ""
-    repository = os.getenv("GITHUB_REPOSITORY", "Cassinaojk/suportedistroslinuxbr")
+    repository = os.getenv("GITHUB_REPOSITORY", "Cassinaojk/distroslinuxoficial")
     branch = os.getenv("GITHUB_REF_NAME", "main") or "main"
     return f"https://raw.githubusercontent.com/{repository}/{branch}/{quote(relative_path, safe='/')}"
 
@@ -271,7 +271,7 @@ def detect_distro_from_title(title):
 
 def count_image_variants_in_blogger(api, base_name):
     c1 = c2 = 0; token = None
-    pattern = re.compile(r"SUPORTE_DISTROS_LINUX_BR_IMAGE_SOURCE:\s*Distro:\s*" + re.escape(base_name) + r"\s*\|\s*Variante:\s*(\d)", re.I)
+    pattern = re.compile(r"BLOG_DISTROS_LINUX_IMAGE_SOURCE:\s*Distro:\s*" + re.escape(base_name) + r"\s*\|\s*Variante:\s*(\d)", re.I)
     try:
         while True:
             kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True}
@@ -303,7 +303,7 @@ def count_bot_posts(api):
             if token: kw["pageToken"] = token
             data = api.posts().list(**kw).execute()
             for post in data.get("items", []):
-                if "SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:" in (post.get("content","") or ""): count += 1
+                if "BLOG_DISTROS_LINUX_SOURCE_URL:" in (post.get("content","") or ""): count += 1
             token = data.get("nextPageToken")
             if not token: break
     except Exception: pass
@@ -327,7 +327,7 @@ def get_last_banner_index(api):
         ).execute()
         for post in response.get("items", []):
             content = post.get("content", "") or ""
-            m = re.search(r"SUPORTE_DISTROS_LINUX_BR_BANNER:\s*(.+)", content)
+            m = re.search(r"BLOG_DISTROS_LINUX_BANNER:\s*(.+)", content)
             if m:
                 last_banner = m.group(1).strip()
                 break
@@ -377,7 +377,7 @@ def get_all_existing_data(api):
                 
                 for m in re.findall(r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I):
                     source_urls.add(normalize_url(m))
-                for m in re.findall(r'SUPORTE_DISTROS_LINUX_BR_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I):
+                for m in re.findall(r'BLOG_DISTROS_LINUX_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I):
                     source_urls.add(normalize_url(m))
                 
                 clean = re.sub(r"\s+", " ", BeautifulSoup(content, "html.parser").get_text(" ", strip=True)).strip()
@@ -721,11 +721,11 @@ def html(article, generated, final_image="", image_origin="", seo=None, banner_i
                            f'<a href="{b_link}" target="_blank" rel="noopener noreferrer">'
                            f'<img src="{b_url}" alt="{b_alt}" style="max-width:100%; height:auto; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">'
                            f'</a></div>')
-            banner_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_BANNER: {b_cfg.get('file')} -->"
+            banner_marker = f"\n<!-- BLOG_DISTROS_LINUX_BANNER: {b_cfg.get('file')} -->"
 
-    src_marker = f"<!-- SUPORTE_DISTROS_LINUX_BR_SOURCE_URL: {ss} -->"
-    img_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_IMAGE_SOURCE: {image_origin} -->" if image_origin else ""
-    seo_marker = f"\n<!-- SUPORTE_DISTROS_LINUX_BR_SEO_DESCRIPTION: {seo.get('description','')[:300]} -->\n<!-- SUPORTE_DISTROS_LINUX_BR_SEO_KEYWORDS: {seo.get('keywords','')[:300]} -->" if seo else ""
+    src_marker = f"<!-- BLOG_DISTROS_LINUX_SOURCE_URL: {ss} -->"
+    img_marker = f"\n<!-- BLOG_DISTROS_LINUX_IMAGE_SOURCE: {image_origin} -->" if image_origin else ""
+    seo_marker = f"\n<!-- BLOG_DISTROS_LINUX_SEO_DESCRIPTION: {seo.get('description','')[:300]} -->\n<!-- BLOG_DISTROS_LINUX_SEO_KEYWORDS: {seo.get('keywords','')[:300]} -->" if seo else ""
     
     return "\n".join(content) + "\n" + src_marker + img_marker + seo_marker + banner_marker
 
@@ -780,7 +780,7 @@ def main():
             final_image, chosen = pick_next_image_url(posts_count + published)
             image_origin = f"Sequência: {chosen}" if final_image else "Fallback final"
         if not final_image:
-            final_image = "https://raw.githubusercontent.com/Cassinaojk/suportedistroslinuxbr/main/bot/imagens/Distribui%C3%A7%C3%B5es%20Linux%20(1).png"
+            final_image = "https://raw.githubusercontent.com/Cassinaojk/distroslinuxoficial/main/bot/imagens/Distribui%C3%A7%C3%B5es%20Linux%20(1).png"
         print(f"✓ Imagem: {image_origin}")
 
         seo = build_seo_payload(art, gen, final_image=final_image, image_origin=image_origin)
