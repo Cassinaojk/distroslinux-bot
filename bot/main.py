@@ -40,7 +40,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.10 (Banners Rotativos Corrigidos + IA 3.5)")
+print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.11 (Banners Rotativos por Contagem de Posts)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -69,11 +69,9 @@ MIN_SOURCE_PARAGRAPHS = 1
 TIMEOUT = 25
 
 # ===== Repositório de imagens (CONFIGURAÇÃO EXPLÍCITA) =====
-# IMPORTANTE: Ajuste aqui o utilizador, repositório e branch corretos
 GITHUB_USER = os.getenv("GITHUB_USER", "Cassinaojk").strip()
 GITHUB_REPO = os.getenv("GITHUB_REPO", "distroslinux-bot").strip()
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
-# Permite override via env padrão do GitHub Actions (se preferir)
 _repo_env = os.getenv("GITHUB_REPOSITORY", "").strip()
 if _repo_env and "/" in _repo_env:
     GITHUB_USER, GITHUB_REPO = _repo_env.split("/", 1)
@@ -165,7 +163,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.10)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.11)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -271,7 +269,6 @@ def resolve_repo_image_url(relative_path):
     """Constrói URL raw.githubusercontent.com de forma explícita e codificada."""
     if not relative_path:
         return ""
-    # Codifica o caminho preservando as barras
     caminho_codificado = quote(relative_path, safe='/')
     return f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{caminho_codificado}"
 
@@ -329,41 +326,50 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
-def get_last_banner_index(api):
-    """Retorna o índice do próximo banner a usar (baseado no último publicado)."""
-    try:
-        response = api.posts().list(
-            blogId=BLOGGER_BLOG_ID,
-            maxResults=10,
-            fetchBodies=True,
-            orderBy="PUBLISHED"
-        ).execute()
-        for post in response.get("items", []):
-            content = post.get("content", "") or ""
-            m = re.search(r"BLOG_DISTROS_LINUX_BANNER:\s*(.+)", content)
-            if m:
-                last_banner = m.group(1).strip()
-                for idx, b in enumerate(BANNERS_CONFIG):
-                    if b["file"] == last_banner:
-                        return (idx + 1) % len(BANNERS_CONFIG)
-                break
-    except Exception as e:
-        print("Aviso: Não foi possível ler o último banner:", e)
-    return 0
+# ============== CORREÇÃO: ROTAÇÃO DE BANNERS ==============
+
+def get_banner_index_by_post_count(api):
+    """
+    Determina o índice do próximo banner com base no total de posts do bot já publicados.
+    Garante rotação perfeita: cada novo post usa o próximo banner da lista.
+    """
+    total_posts = count_bot_posts(api)
+    if not BANNERS_CONFIG:
+        return 0
+    return total_posts % len(BANNERS_CONFIG)
+
+def verify_banners_exist():
+    """Verifica se todos os banners configurados existem no repositório."""
+    print("Verificando banners no repositório...")
+    for b in BANNERS_CONFIG:
+        url = resolve_repo_image_url(f"{BANNERS_DIR}/{b['file']}")
+        try:
+            r = requests.head(url, timeout=10, allow_redirects=True)
+            status = "✓ OK" if r.status_code == 200 else f"✗ HTTP {r.status_code}"
+        except Exception as e:
+            status = f"✗ Erro: {e}"
+        print(f"  {status} - {b['file']}")
+    print()
 
 def pick_next_banner(api):
-    """Seleciona o próximo banner na ordem, garantindo rotação entre execuções e dentro da mesma execução."""
+    """
+    Seleciona o próximo banner na ordem, garantindo rotação entre execuções e dentro da mesma execução.
+    Usa o total de posts publicados como base — não depende de ler o último post (mais confiável).
+    """
     global _next_banner_idx
     if _next_banner_idx is not None:
         idx = _next_banner_idx
         _next_banner_idx = (idx + 1) % len(BANNERS_CONFIG)
     else:
-        idx = get_last_banner_index(api)
+        idx = get_banner_index_by_post_count(api)
         _next_banner_idx = (idx + 1) % len(BANNERS_CONFIG)
 
     banner = BANNERS_CONFIG[idx]
     url = resolve_repo_image_url(f"{BANNERS_DIR}/{banner['file']}")
+    print(f"  → Banner selecionado: índice {idx} = {banner['file']}")
     return banner, url
+
+# ============== FIM DA CORREÇÃO ==============
 
 # ============== BUSCA NO BLOGGER ==============
 
@@ -746,8 +752,13 @@ def main():
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
 
+    # Debug: verificar se todos os banners existem no repositório
+    verify_banners_exist()
+
     old_blog_urls, old_source_urls, existing_posts = get_all_existing_data(api)
     posts_count = count_bot_posts(api)
+    print(f"Total de posts do bot já publicados: {posts_count}")
+    print(f"Próximo banner (índice): {posts_count % len(BANNERS_CONFIG)} -> {BANNERS_CONFIG[posts_count % len(BANNERS_CONFIG)]['file']}")
 
     candidates = []; candidate_urls = set(); source_counts = {}; prefiltered = 0
     for source in SOURCES:
@@ -828,5 +839,5 @@ def main():
     print(f"Ignoradas: {ignored}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.10 ATIVA: Banners Rotativos Corrigidos | Filtro Flexível | Modelo IA Gemini 3.5")
+print("VERSÃO 3.11 ATIVA: Banners Rotativos por Contagem de Posts | Filtro Flexível | Modelo IA Gemini 3.5")
 main()
