@@ -27,6 +27,7 @@ def print(*args, **kwargs):
         or message.startswith("MAX_AGE_DAYS")
         or message.startswith("✓ SEO")
         or message.startswith("✓ Imagem")
+        or message.startswith("✓ Banner")
         or message.startswith("Aviso:")
     )
     if important:
@@ -39,7 +40,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.9 (Banners Rotativos Corrigidos + IA 3.5)")
+print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.10 (Banners Rotativos Corrigidos + IA 3.5)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -67,6 +68,17 @@ MIN_SOURCE_CHARS = 250
 MIN_SOURCE_PARAGRAPHS = 1
 TIMEOUT = 25
 
+# ===== Repositório de imagens (CONFIGURAÇÃO EXPLÍCITA) =====
+# IMPORTANTE: Ajuste aqui o utilizador, repositório e branch corretos
+GITHUB_USER = os.getenv("GITHUB_USER", "Cassinaojk").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "distroslinux-bot").strip()
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main").strip()
+# Permite override via env padrão do GitHub Actions (se preferir)
+_repo_env = os.getenv("GITHUB_REPOSITORY", "").strip()
+if _repo_env and "/" in _repo_env:
+    GITHUB_USER, GITHUB_REPO = _repo_env.split("/", 1)
+GITHUB_BRANCH = os.getenv("GITHUB_REF_NAME", GITHUB_BRANCH).strip() or GITHUB_BRANCH
+
 # Modelos de IA Atualizados
 GEMINI_MODEL_TEXT = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
@@ -89,13 +101,13 @@ DISTRO_BASE_NAMES = {
 }
 DISTROS_IMAGE_DIR = "bot/imagens/distros"
 
-# ===== Configuração dos Banners =====
+# ===== Configuração dos Banners (ORDEM DEFINIDA) =====
 BANNERS_CONFIG = [
-    {"file": "estacio.png", "link": "https://estacio.br/selecao?cod_agente=14369444&u=723918&end=1", "alt": "Estácio - Cursos"},
-    {"file": "radio luz gospel.png", "link": "https://radioluzgospel.blogspot.com/", "alt": "Rádio Luz Gospel"},
-    {"file": "fasul cursos.png", "link": "https://afiliadoeducacionalfasul.com.br/100322024/cursos-livres", "alt": "Fasul - Cursos Livres"},
-    {"file": "graduação fasul.png", "link": "https://afiliadoeducacionalfasul.com.br/100322024/graduacao/cursos-graduacao-ead", "alt": "Fasul - Graduação EAD"},
-    {"file": "radio rockback fm.png", "link": "https://radiorockbackfm.blogspot.com/", "alt": "Rádio Rockback FM"}
+    {"file": "estacio.png",              "link": "https://estacio.br/selecao?cod_agente=14369444&u=723918&end=1",                 "alt": "Estácio - Cursos"},
+    {"file": "radio luz gospel.png",     "link": "https://radioluzgospel.blogspot.com/",                                          "alt": "Rádio Luz Gospel"},
+    {"file": "fasul cursos.png",         "link": "https://afiliadoeducacionalfasul.com.br/100322024/cursos-livres",                 "alt": "Fasul - Cursos Livres"},
+    {"file": "graduação fasul.png",      "link": "https://afiliadoeducacionalfasul.com.br/100322024/graduacao/cursos-graduacao-ead", "alt": "Fasul - Graduação EAD"},
+    {"file": "radio rockback fm.png",    "link": "https://radiorockbackfm.blogspot.com/",                                         "alt": "Rádio Rockback FM"},
 ]
 BANNERS_DIR = "bot/banners"
 
@@ -153,7 +165,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.9)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.10)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -256,10 +268,12 @@ def videos(x):
 # ============== IMAGENS E BANNERS ==============
 
 def resolve_repo_image_url(relative_path):
-    if not relative_path: return ""
-    repository = os.getenv("GITHUB_REPOSITORY", "Cassinaojk/distroslinuxoficial")
-    branch = os.getenv("GITHUB_REF_NAME", "main") or "main"
-    return f"https://raw.githubusercontent.com/{repository}/{branch}/{quote(relative_path, safe='/')}"
+    """Constrói URL raw.githubusercontent.com de forma explícita e codificada."""
+    if not relative_path:
+        return ""
+    # Codifica o caminho preservando as barras
+    caminho_codificado = quote(relative_path, safe='/')
+    return f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{caminho_codificado}"
 
 def detect_distro_from_title(title):
     norm = _tech_norm(title)
@@ -316,8 +330,7 @@ def pick_next_image_url(posts_count):
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
 def get_last_banner_index(api):
-    token = None
-    last_banner = ""
+    """Retorna o índice do próximo banner a usar (baseado no último publicado)."""
     try:
         response = api.posts().list(
             blogId=BLOGGER_BLOG_ID,
@@ -330,27 +343,24 @@ def get_last_banner_index(api):
             m = re.search(r"BLOG_DISTROS_LINUX_BANNER:\s*(.+)", content)
             if m:
                 last_banner = m.group(1).strip()
+                for idx, b in enumerate(BANNERS_CONFIG):
+                    if b["file"] == last_banner:
+                        return (idx + 1) % len(BANNERS_CONFIG)
                 break
     except Exception as e:
         print("Aviso: Não foi possível ler o último banner:", e)
-    if not last_banner:
-        return 0
-    for idx, b in enumerate(BANNERS_CONFIG):
-        if b["file"] == last_banner:
-            return (idx + 1) % len(BANNERS_CONFIG)
     return 0
 
 def pick_next_banner(api):
+    """Seleciona o próximo banner na ordem, garantindo rotação entre execuções e dentro da mesma execução."""
     global _next_banner_idx
-    # Se já temos um índice definido para esta execução, usa ele e incrementa
     if _next_banner_idx is not None:
         idx = _next_banner_idx
         _next_banner_idx = (idx + 1) % len(BANNERS_CONFIG)
     else:
-        # Se é a primeira vez, busca na API e guarda o próximo
         idx = get_last_banner_index(api)
         _next_banner_idx = (idx + 1) % len(BANNERS_CONFIG)
-        
+
     banner = BANNERS_CONFIG[idx]
     url = resolve_repo_image_url(f"{BANNERS_DIR}/{banner['file']}")
     return banner, url
@@ -361,34 +371,34 @@ def get_all_existing_data(api):
     blog_urls, source_urls = set(), set()
     existing_posts = []
     token = None
-    
+
     try:
         while True:
             kw = {"blogId": BLOGGER_BLOG_ID, "maxResults": 500, "fetchBodies": True}
             if token: kw["pageToken"] = token
             data = api.posts().list(**kw).execute()
-            
+
             for post in data.get("items", []):
                 post_url = normalize_url(post.get("url",""))
                 if post_url: blog_urls.add(post_url)
-                
+
                 content = post.get("content","") or ""
                 title = post.get("title","") or ""
-                
+
                 for m in re.findall(r'href=["\'](https?://[^"\']+)["\']', content, flags=re.I):
                     source_urls.add(normalize_url(m))
                 for m in re.findall(r'BLOG_DISTROS_LINUX_SOURCE_URL:\s*(https?://[^\s]+?)\s*-->', content, flags=re.I):
                     source_urls.add(normalize_url(m))
-                
+
                 clean = re.sub(r"\s+", " ", BeautifulSoup(content, "html.parser").get_text(" ", strip=True)).strip()
                 if clean and len(clean) > 100:
                     existing_posts.append({"title": title, "text": clean})
-                    
+
             token = data.get("nextPageToken")
             if not token: break
-    except Exception as e: 
+    except Exception as e:
         print("Erro ao consultar Blogger:", e)
-    
+
     print(f"Posts existentes verificados: {len(existing_posts)}")
     return blog_urls, source_urls, existing_posts
 
@@ -401,7 +411,7 @@ def get_article(url):
     title = re.sub(r"\s+", " ", n.get_text(" ", strip=True) if n else "").strip()
     if not title: return None
     if title.lower() in {"lançamentos","notícias","noticias","home","início","inicio","últimas notícias","ultimas noticias","404","página não encontrada","pagina nao encontrada"}: return None
-    
+
     d = article_date(x)
     if d:
         now = datetime.now()
@@ -420,14 +430,14 @@ def get_article(url):
         t = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
         if len(t) >= 35: paragraphs.append(t)
     text = "\n\n".join(paragraphs)
-    
-    if len(text) < MIN_SOURCE_CHARS or len(paragraphs) < MIN_SOURCE_PARAGRAPHS: 
+
+    if len(text) < MIN_SOURCE_CHARS or len(paragraphs) < MIN_SOURCE_PARAGRAPHS:
         return None
-        
+
     link_count = len(box.find_all("a"))
-    if len(text) < 1000 and link_count > len(paragraphs) * 4: 
+    if len(text) < 1000 and link_count > len(paragraphs) * 4:
         return None
-        
+
     vv = videos(x)
     inline_imgs = [{"url": img, "after_paragraph": 2, "is_main": True}] if img else []
     return {"url": normalize_url(url), "title": title, "date": d, "image": img, "text": text[:16000], "videos": vv, "inline_images": inline_imgs}
@@ -437,19 +447,19 @@ def links(source):
     source_host = urlparse(source["url"]).netloc.lower()
     section_only = source.get("section_only", False)
     path_prefix = source.get("path_prefix", "").lower()
-    
+
     def host_matches(u):
         h = urlparse(u).netloc.lower()
         if h == source_host: return True
         if h.endswith("." + source_host): return True
         hn = h.replace("www.","",1); sn = source_host.replace("www.","",1)
         return hn == sn or hn.endswith("." + sn)
-        
+
     def section_matches(u):
         if not section_only: return True
         if not path_prefix: return True
         return path_prefix in urlparse(u).path.lower()
-        
+
     for feed in source["feeds"]:
         x = soup(feed, True)
         if not x: continue
@@ -460,9 +470,9 @@ def links(source):
             if not u or bad_url(u): continue
             if not host_matches(u) or not section_matches(u): continue
             if u not in seen: seen.add(u); out.append(u)
-            
+
     rss_count = len(out)
-    
+
     x = soup(source["url"])
     if x:
         for a in x.find_all("a", href=True):
@@ -472,7 +482,7 @@ def links(source):
             path = urlparse(u).path.strip("/")
             if path.count("/") >= 1 and len(path) > 10:
                 if u not in seen: seen.add(u); out.append(u)
-                
+
     html_count = len(out) - rss_count
     print(f"Links em {source['nome']}: {len(out)} (RSS: {rss_count}, HTML: {html_count})")
     return out[:MAX_LINKS_PER_SOURCE]
@@ -709,7 +719,7 @@ def html(article, generated, final_image="", image_origin="", seo=None, banner_i
         content.append('<div style="margin:24px 0;"><div style="position:relative;width:100%;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;">'
                        f'<iframe src="{vu}" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;" frameborder="0" allowfullscreen loading="lazy"></iframe>'
                        '</div></div>')
-    
+
     banner_marker = ""
     if banner_info:
         b_cfg = banner_info.get("config")
@@ -726,7 +736,7 @@ def html(article, generated, final_image="", image_origin="", seo=None, banner_i
     src_marker = f"<!-- BLOG_DISTROS_LINUX_SOURCE_URL: {ss} -->"
     img_marker = f"\n<!-- BLOG_DISTROS_LINUX_IMAGE_SOURCE: {image_origin} -->" if image_origin else ""
     seo_marker = f"\n<!-- BLOG_DISTROS_LINUX_SEO_DESCRIPTION: {seo.get('description','')[:300]} -->\n<!-- BLOG_DISTROS_LINUX_SEO_KEYWORDS: {seo.get('keywords','')[:300]} -->" if seo else ""
-    
+
     return "\n".join(content) + "\n" + src_marker + img_marker + seo_marker + banner_marker
 
 # ============== MAIN ==============
@@ -735,7 +745,7 @@ def main():
     print(f"MAX_AGE_DAYS configurado: {MAX_AGE_DAYS}")
     gen_client = genai.Client(api_key=GEMINI_API_KEY)
     api = blogger()
-    
+
     old_blog_urls, old_source_urls, existing_posts = get_all_existing_data(api)
     posts_count = count_bot_posts(api)
 
@@ -757,7 +767,7 @@ def main():
     print(f"Novas matérias aceitas: {len(candidates)}")
 
     published = 0; failed = 0; ignored = 0
-    
+
     while candidates and published < MAX_POSTS_PER_RUN:
         art = candidates.pop(0)
         n = normalize_url(art["url"])
@@ -788,7 +798,7 @@ def main():
 
         banner_cfg, banner_url = pick_next_banner(api)
         banner_info = {"config": banner_cfg, "url": banner_url}
-        print(f"✓ Banner: {banner_cfg['file']}")
+        print(f"✓ Banner: {banner_cfg['file']} -> {banner_url}")
 
         try:
             post_body = {"title": seo["title"].strip(), "content": html(art, gen, final_image=final_image, image_origin=image_origin, seo=seo, banner_info=banner_info), "labels": seo["labels"]}
@@ -818,5 +828,5 @@ def main():
     print(f"Ignoradas: {ignored}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.9 ATIVA: Banners Rotativos Corrigidos | Filtro Flexível | Modelo IA Gemini 3.5")
+print("VERSÃO 3.10 ATIVA: Banners Rotativos Corrigidos | Filtro Flexível | Modelo IA Gemini 3.5")
 main()
