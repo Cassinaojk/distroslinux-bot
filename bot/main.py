@@ -20,6 +20,7 @@ def print(*args, **kwargs):
         or message.startswith("Falhas:")
         or message.startswith("⚠ Duplicata de assunto:")
         or message.startswith("⚠ Notícia antiga:")
+        or message.startswith("⚠ Imagem bloqueada:")
         or message.startswith("Erro:")
         or message.startswith("Fontes encontradas:")
         or message.startswith("Puladas:")
@@ -40,7 +41,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.11 (Banners Rotativos por Contagem de Posts)")
+print("BLOG DISTROS LINUX - ROBÔ DE NOTÍCIAS 3.12 (Bloqueio de Imagens Específicas)")
 
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
@@ -109,6 +110,35 @@ BANNERS_CONFIG = [
 ]
 BANNERS_DIR = "bot/banners"
 
+# ===== LISTA NEGRA DE IMAGENS (NUNCA PUBLICAR) =====
+# Correspondência por substring normalizada (case-insensitive, sem query string).
+BLOCKED_IMAGE_PATTERNS = [
+    "Linux_opengraph_square2-01.png",
+    "assets.linuxtoday.com/uploads/2021/07/Linux_opengraph_square2-01",
+]
+
+def _norm_img_key(u):
+    """Normaliza uma URL de imagem para comparação (remove query string, decodifica, minúsculas)."""
+    if not u:
+        return ""
+    base = u.split("?")[0].split("#")[0].strip()
+    try:
+        from urllib.parse import unquote
+        base = unquote(base)
+    except Exception:
+        pass
+    return base.lower()
+
+def is_blocked_image(u):
+    """Retorna True se a URL estiver na lista negra de imagens."""
+    if not u:
+        return False
+    key = _norm_img_key(u)
+    for pat in BLOCKED_IMAGE_PATTERNS:
+        if _norm_img_key(pat) in key:
+            return True
+    return False
+
 LINUX_TERMS = (
     "linux", "ubuntu", "fedora", "debian", "arch", "manjaro", "mint",
     "opensuse", "red hat", "centos", "kali", "gentoo", "slackware",
@@ -163,7 +193,7 @@ SHARE_DOMAINS = ("pinterest.","reddit.com/submit","facebook.com/sharer","twitter
 VIDEO_HOSTS = ("youtube.com/embed/","youtube.com/watch","youtube-nocookie.com/embed/","youtu.be/","player.vimeo.com","vimeo.com/video","facebook.com/plugins/video","web.facebook.com/plugins/video","instagram.com/p/","instagram.com/reel/","instagram.com/tv/","dailymotion.com/embed","twitch.tv/","streamable.com/e/","rumble.com/embed")
 
 s = requests.Session()
-s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.11)"})
+s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; BlogDistrosLinuxBot/3.12)"})
 
 gemini_calls = 0
 gemini_quota_hit = False
@@ -234,12 +264,17 @@ def article_date(x):
     return None
 
 def image_original(x):
+    """Extrai imagem OG principal, ignorando a lista negra."""
     for sel in ('meta[property="og:image"]','meta[property="og:image:secure_url"]','meta[name="twitter:image"]','meta[name="twitter:image:src"]','meta[itemprop="image"]'):
         n = x.select_one(sel)
         if n:
             u = (n.get("content") or "").strip()
             if u.startswith("//"): u = "https:" + u
-            if u.startswith(("http://", "https://")): return u
+            if u.startswith(("http://", "https://")):
+                if is_blocked_image(u):
+                    print(f"⚠ Imagem bloqueada: {u}")
+                    continue
+                return u
     return ""
 
 def videos(x):
@@ -326,20 +361,15 @@ def pick_next_image_url(posts_count):
     idx = posts_count % total
     return resolve_repo_image_url(IMAGE_FILES[idx]), IMAGE_FILES[idx]
 
-# ============== CORREÇÃO: ROTAÇÃO DE BANNERS ==============
+# ============== ROTAÇÃO DE BANNERS ==============
 
 def get_banner_index_by_post_count(api):
-    """
-    Determina o índice do próximo banner com base no total de posts do bot já publicados.
-    Garante rotação perfeita: cada novo post usa o próximo banner da lista.
-    """
     total_posts = count_bot_posts(api)
     if not BANNERS_CONFIG:
         return 0
     return total_posts % len(BANNERS_CONFIG)
 
 def verify_banners_exist():
-    """Verifica se todos os banners configurados existem no repositório."""
     print("Verificando banners no repositório...")
     for b in BANNERS_CONFIG:
         url = resolve_repo_image_url(f"{BANNERS_DIR}/{b['file']}")
@@ -352,10 +382,6 @@ def verify_banners_exist():
     print()
 
 def pick_next_banner(api):
-    """
-    Seleciona o próximo banner na ordem, garantindo rotação entre execuções e dentro da mesma execução.
-    Usa o total de posts publicados como base — não depende de ler o último post (mais confiável).
-    """
     global _next_banner_idx
     if _next_banner_idx is not None:
         idx = _next_banner_idx
@@ -368,8 +394,6 @@ def pick_next_banner(api):
     url = resolve_repo_image_url(f"{BANNERS_DIR}/{banner['file']}")
     print(f"  → Banner selecionado: índice {idx} = {banner['file']}")
     return banner, url
-
-# ============== FIM DA CORREÇÃO ==============
 
 # ============== BUSCA NO BLOGGER ==============
 
@@ -430,6 +454,11 @@ def get_article(url):
         d = datetime.now()
 
     img = image_original(x) or ""
+    if img and is_blocked_image(img):
+        # image_original já filtra, mas reforço defensivo
+        print(f"⚠ Imagem bloqueada: {img}")
+        img = ""
+
     box = x.find("article") or x.find("main") or x
     paragraphs = []
     for p in box.find_all("p"):
@@ -653,7 +682,13 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
         if k in seen: continue
         seen.add(k); labels_final.append(l)
     labels_final = labels_final[:10]
+
+    # Reforço: se a imagem escolhida estiver na lista negra, remove
     image_url = final_image or article.get("image","")
+    if is_blocked_image(image_url):
+        print(f"⚠ Imagem bloqueada no SEO: {image_url}")
+        image_url = ""
+
     canonical = article.get("url","")
     published = (article.get("date") or datetime.now()).isoformat()
     date_modified = datetime.now().isoformat()
@@ -687,6 +722,9 @@ def build_seo_payload(article, generated, final_image="", image_origin=""):
     return {"title":title,"titulo_base":tb,"description":description,"keywords":keywords,"labels":labels_final,"canonical":canonical,"schema":schema,"breadcrumb":breadcrumb,"html_head":html_head,"source_url":article.get("url",""),"assunto":assunto,"categoria_seo":cat}
 
 def _render_inline_image_html(img_url, alt_text):
+    if is_blocked_image(img_url):
+        print(f"⚠ Imagem bloqueada (inline): {img_url}")
+        return ""
     si = (img_url or "").replace("&","&amp;").replace('"',"&quot;")
     sa = (alt_text or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
     if not si: return ""
@@ -700,13 +738,22 @@ def html(article, generated, final_image="", image_origin="", seo=None, banner_i
     seo = seo or {}
     tb = seo.get("titulo_base") or generated.get("titulo","")
     st = tb.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+
+    # Reforço: nunca usar imagem bloqueada como principal
     iu = final_image or article["image"]
+    if is_blocked_image(iu):
+        print(f"⚠ Imagem bloqueada (principal): {iu}")
+        iu = ""
+
     si = iu.replace("&","&amp;").replace('"',"&quot;")
     ss = article["url"].replace("&","&amp;").replace('"',"&quot;")
     head = seo.get("html_head","")
     content = []
     if head: content.append(head)
-    content.extend([f'<p><strong>{generated["resumo"]}</strong></p>', f'<p><img src="{si}" alt="{st}" title="{st}" width="1200" height="630" style="max-width:100%;height:auto;border-radius:12px;"></p>'])
+    content.append(f'<p><strong>{generated["resumo"]}</strong></p>')
+    if si:
+        content.append(f'<p><img src="{si}" alt="{st}" title="{st}" width="1200" height="630" style="max-width:100%;height:auto;border-radius:12px;"></p>')
+
     paras = [p.strip() for p in re.split(r"\n+", generated["materia"]) if p.strip()]
     imgs = list(article.get("inline_images") or [])[:1]
     imgs.sort(key=lambda x: x.get("after_paragraph", 9999))
@@ -802,6 +849,13 @@ def main():
             image_origin = f"Sequência: {chosen}" if final_image else "Fallback final"
         if not final_image:
             final_image = "https://raw.githubusercontent.com/Cassinaojk/distroslinuxoficial/main/bot/imagens/Distribui%C3%A7%C3%B5es%20Linux%20(1).png"
+
+        # Reforço final: se a imagem escolhida for bloqueada, usa fallback seguro
+        if is_blocked_image(final_image):
+            print(f"⚠ Imagem bloqueada (final): {final_image} — substituindo pelo fallback seguro")
+            final_image = "https://raw.githubusercontent.com/Cassinaojk/distroslinuxoficial/main/bot/imagens/Distribui%C3%A7%C3%B5es%20Linux%20(1).png"
+            image_origin = "Fallback (imagem bloqueada)"
+
         print(f"✓ Imagem: {image_origin}")
 
         seo = build_seo_payload(art, gen, final_image=final_image, image_origin=image_origin)
@@ -839,5 +893,5 @@ def main():
     print(f"Ignoradas: {ignored}")
     print(f"Falhas: {failed}")
 
-print("VERSÃO 3.11 ATIVA: Banners Rotativos por Contagem de Posts | Filtro Flexível | Modelo IA Gemini 3.5")
+print("VERSÃO 3.12 ATIVA: Bloqueio de Imagens Específicas | Banners Rotativos | Filtro Flexível | Gemini 3.5")
 main()
